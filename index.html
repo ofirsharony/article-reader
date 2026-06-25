@@ -113,12 +113,14 @@
       voices = speechSynthesis.getVoices();
       voiceSelect.innerHTML = "";
 
-      // Known macOS/Windows novelty and low-quality "robotic" voices to hide.
+      // Voices to hide: macOS/Windows novelty/robotic voices, plus a few
+      // natural ones the user opted out of (Tessa, Rishi).
       const noveltyVoices = new Set([
         "Albert", "Bad News", "Bahh", "Bells", "Boing", "Bubbles", "Cellos",
         "Eddy", "Flo", "Fred", "Good News", "Grandma", "Grandpa", "Jester",
-        "Junior", "Kathy", "Organ", "Ralph", "Reed", "Rocko", "Sandy",
-        "Shelley", "Superstar", "Trinoids", "Whisper", "Wobble", "Zarvox"
+        "Junior", "Kathy", "Organ", "Ralph", "Reed", "Rishi", "Rocko",
+        "Sandy", "Shelley", "Superstar", "Tessa", "Trinoids", "Whisper",
+        "Wobble", "Zarvox"
       ]);
 
       const englishVoices = voices.filter(v => {
@@ -171,16 +173,20 @@
       return voices[Number(voiceSelect.value)] || null;
     }
 
-    function updateControls(reading) {
-      pauseButton.disabled = !reading;
-      resumeButton.disabled = !reading;
-      stopButton.disabled = !reading;
+    // Drive the buttons off real playback state, not a single on/off flag:
+    //   idle    -> nothing playing, all disabled
+    //   playing -> Pause + Stop enabled
+    //   paused  -> Resume + Stop enabled
+    function setControls(state) {
+      pauseButton.disabled = state !== "playing";
+      resumeButton.disabled = state !== "paused";
+      stopButton.disabled = state === "idle";
     }
 
     function speakChunks() {
       if (chunkIndex >= chunks.length) {
         setStatus("Finished reading.");
-        updateControls(false);
+        setControls("idle");
         return;
       }
 
@@ -190,14 +196,21 @@
       utterance.pitch = 1;
       utterance.volume = 1;
 
+      // Keep the controls in sync with what the speech engine actually does.
+      utterance.onstart = () => setControls("playing");
+      utterance.onpause = () => setControls("paused");
+      utterance.onresume = () => setControls("playing");
+
       utterance.onend = () => {
         chunkIndex += 1;
         speakChunks();
       };
 
-      utterance.onerror = () => {
+      utterance.onerror = (event) => {
+        // "interrupted"/"canceled" fire on a deliberate Stop or re-read; not errors.
+        if (event.error === "interrupted" || event.error === "canceled") return;
         setStatus("Speech playback failed. Try another voice.");
-        updateControls(false);
+        setControls("idle");
       };
 
       setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
@@ -214,7 +227,8 @@
       speechSynthesis.cancel();
       chunks = splitText(cleaned);
       chunkIndex = 0;
-      updateControls(true);
+      // Optimistically enable controls; onstart will confirm "playing".
+      setControls("playing");
       speakChunks();
     }
 
@@ -240,7 +254,9 @@
         textArea.value = text;
         readText(text);
       } catch (error) {
-        setStatus(`${error.message} You can paste the article text manually below.`);
+        // Extraction failed -> nothing will play, so make sure controls reflect idle.
+        setControls("idle");
+        setStatus(`${error.message} Paste the article text below and press "Read pasted text".`);
       } finally {
         loadButton.disabled = false;
       }
@@ -252,11 +268,23 @@
 
     loadButton.addEventListener("click", loadArticle);
     readTextButton.addEventListener("click", () => readText(textArea.value));
-    pauseButton.addEventListener("click", () => speechSynthesis.pause());
-    resumeButton.addEventListener("click", () => speechSynthesis.resume());
+
+    // Switching voice re-reads the text already loaded — no need to re-fetch
+    // from Jina, since the content is in the textarea.
+    voiceSelect.addEventListener("change", () => {
+      if (textArea.value.trim()) readText(textArea.value);
+    });
+    pauseButton.addEventListener("click", () => {
+      speechSynthesis.pause();
+      setControls("paused");
+    });
+    resumeButton.addEventListener("click", () => {
+      speechSynthesis.resume();
+      setControls("playing");
+    });
     stopButton.addEventListener("click", () => {
       speechSynthesis.cancel();
-      updateControls(false);
+      setControls("idle");
       setStatus("Stopped.");
     });
 

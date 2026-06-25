@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Article Reader</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%8A%3C/text%3E%3C/svg%3E" />
   <style>
     :root { color-scheme: light dark; }
     body {
@@ -112,11 +113,21 @@
       voices = speechSynthesis.getVoices();
       voiceSelect.innerHTML = "";
 
-      const professionalVoices = voices
-        .filter(v => /en/i.test(v.lang))
-        .concat(voices.filter(v => !/en/i.test(v.lang)));
+      // Known macOS/Windows novelty and low-quality "robotic" voices to hide.
+      const noveltyVoices = new Set([
+        "Albert", "Bad News", "Bahh", "Bells", "Boing", "Bubbles", "Cellos",
+        "Eddy", "Flo", "Fred", "Good News", "Grandma", "Grandpa", "Jester",
+        "Junior", "Kathy", "Organ", "Ralph", "Reed", "Rocko", "Sandy",
+        "Shelley", "Superstar", "Trinoids", "Whisper", "Wobble", "Zarvox"
+      ]);
 
-      professionalVoices.forEach((voice, index) => {
+      const englishVoices = voices.filter(v => {
+        if (!v.lang.toLowerCase().startsWith("en")) return false;
+        const baseName = v.name.split(" (")[0].trim();
+        return !noveltyVoices.has(baseName);
+      });
+
+      englishVoices.forEach((voice, index) => {
         const option = document.createElement("option");
         option.value = voices.indexOf(voice);
         option.textContent = `${voice.name} (${voice.lang})`;

@@ -42,7 +42,8 @@
     }
     button.primary { background: CanvasText; color: Canvas; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
-    .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+    .controls { display: grid; grid-template-columns: 1fr 1.4fr 1fr; gap: 10px; margin-top: 10px; }
+    button.toggle { font-size: 22px; line-height: 1; padding: 10px; }
     #status { margin-top: 14px; min-height: 24px; font-weight: 600; }
     small { display: block; margin-top: 14px; opacity: 0.7; }
     @media (max-width: 620px) {
@@ -72,9 +73,9 @@
     <button class="primary" id="loadButton">Load and read</button>
 
     <div class="controls">
-      <button id="pauseButton" disabled>Pause</button>
-      <button id="resumeButton" disabled>Resume</button>
-      <button id="stopButton" disabled>Stop</button>
+      <button id="prevButton" class="toggle" disabled aria-label="Previous">&#9198;</button>
+      <button id="playPauseButton" class="toggle" disabled aria-label="Play">&#9654;</button>
+      <button id="nextButton" class="toggle" disabled aria-label="Next">&#9197;</button>
     </div>
 
     <div id="status"></div>
@@ -97,9 +98,14 @@
     const statusEl = document.getElementById("status");
     const loadButton = document.getElementById("loadButton");
     const readTextButton = document.getElementById("readTextButton");
-    const pauseButton = document.getElementById("pauseButton");
-    const resumeButton = document.getElementById("resumeButton");
-    const stopButton = document.getElementById("stopButton");
+    const prevButton = document.getElementById("prevButton");
+    const playPauseButton = document.getElementById("playPauseButton");
+    const nextButton = document.getElementById("nextButton");
+
+    const PLAY_ICON = "▶";   // ▶
+    const PAUSE_ICON = "⏸";  // ⏸
+    let playbackState = "idle";   // "idle" | "playing" | "paused"
+    let currentUtterance = null;
 
     let voices = [];
     let chunks = [];
@@ -173,20 +179,33 @@
       return voices[Number(voiceSelect.value)] || null;
     }
 
-    // Drive the buttons off real playback state, not a single on/off flag:
-    //   idle    -> nothing playing, all disabled
-    //   playing -> Pause + Stop enabled
-    //   paused  -> Resume + Stop enabled
+    // Single play/pause toggle, driven by real playback state:
+    //   idle    -> disabled, shows ▶
+    //   playing -> enabled,  shows ⏸ (click to pause)
+    //   paused  -> enabled,  shows ▶ (click to resume)
     function setControls(state) {
-      pauseButton.disabled = state !== "playing";
-      resumeButton.disabled = state !== "paused";
-      stopButton.disabled = state === "idle";
+      playbackState = state;
+      playPauseButton.disabled = state === "idle";
+      const playing = state === "playing";
+      playPauseButton.textContent = playing ? PAUSE_ICON : PLAY_ICON;
+      playPauseButton.setAttribute(
+        "aria-label",
+        playing ? "Pause" : state === "paused" ? "Resume" : "Play"
+      );
+      updateNav();
+    }
+
+    function updateNav() {
+      // Prev/Next available whenever something is loaded (playing or paused).
+      prevButton.disabled = playbackState === "idle" || chunkIndex <= 0;
+      nextButton.disabled = playbackState === "idle" || chunkIndex >= chunks.length - 1;
     }
 
     function speakChunks() {
       if (chunkIndex >= chunks.length) {
         setStatus("Finished reading.");
         setControls("idle");
+        updateNav();
         return;
       }
 
@@ -197,24 +216,41 @@
       utterance.volume = 1;
 
       // Keep the controls in sync with what the speech engine actually does.
-      utterance.onstart = () => setControls("playing");
+      utterance.onstart = () => { setControls("playing"); updateNav(); };
       utterance.onpause = () => setControls("paused");
       utterance.onresume = () => setControls("playing");
 
       utterance.onend = () => {
+        // Ignore the end event of an utterance we've already replaced (e.g. via
+        // prev/next or a re-read) so navigation can't double-advance the index.
+        if (utterance !== currentUtterance) return;
         chunkIndex += 1;
         speakChunks();
       };
 
       utterance.onerror = (event) => {
-        // "interrupted"/"canceled" fire on a deliberate Stop or re-read; not errors.
+        // "interrupted"/"canceled" fire on a deliberate skip or re-read; not errors.
         if (event.error === "interrupted" || event.error === "canceled") return;
+        if (utterance !== currentUtterance) return;
         setStatus("Speech playback failed. Try another voice.");
         setControls("idle");
       };
 
+      currentUtterance = utterance;
       setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
       speechSynthesis.speak(utterance);
+    }
+
+    // Jump to a chunk and play from there (used by prev/next and re-reads).
+    function playFrom(index) {
+      if (!chunks.length) return;
+      chunkIndex = Math.max(0, Math.min(index, chunks.length - 1));
+      speechSynthesis.cancel();
+      setControls("playing");
+      speakChunks();
+      // If we were paused before skipping, some engines stay paused after a
+      // cancel()+speak(); resume() is a no-op when already playing.
+      speechSynthesis.resume();
     }
 
     function readText(text) {
@@ -274,20 +310,19 @@
     voiceSelect.addEventListener("change", () => {
       if (textArea.value.trim()) readText(textArea.value);
     });
-    pauseButton.addEventListener("click", () => {
-      speechSynthesis.pause();
-      setControls("paused");
+    playPauseButton.addEventListener("click", () => {
+      if (playbackState === "playing") {
+        speechSynthesis.pause();
+        setControls("paused");
+      } else if (playbackState === "paused") {
+        speechSynthesis.resume();
+        setControls("playing");
+      }
     });
-    resumeButton.addEventListener("click", () => {
-      speechSynthesis.resume();
-      setControls("playing");
-    });
-    stopButton.addEventListener("click", () => {
-      speechSynthesis.cancel();
-      setControls("idle");
-      setStatus("Stopped.");
-    });
+    prevButton.addEventListener("click", () => playFrom(chunkIndex - 1));
+    nextButton.addEventListener("click", () => playFrom(chunkIndex + 1));
 
+    setControls("idle");
     loadVoices();
     speechSynthesis.onvoiceschanged = loadVoices;
   </script>

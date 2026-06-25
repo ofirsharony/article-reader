@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Article Reader</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 32px 18px;
+      line-height: 1.5;
+    }
+    .card {
+      border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+      border-radius: 16px;
+      padding: 22px;
+      box-shadow: 0 8px 28px rgb(0 0 0 / 0.08);
+    }
+    h1 { margin: 0 0 8px; font-size: 30px; }
+    p { margin: 0 0 18px; opacity: 0.78; }
+    label { display: block; font-weight: 650; margin: 18px 0 8px; }
+    input, select, textarea, button {
+      width: 100%;
+      box-sizing: border-box;
+      font: inherit;
+      border-radius: 10px;
+      border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      padding: 12px;
+      background: Canvas;
+      color: CanvasText;
+    }
+    textarea { min-height: 180px; resize: vertical; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    button {
+      cursor: pointer;
+      margin-top: 12px;
+      font-weight: 700;
+    }
+    button.primary { background: CanvasText; color: Canvas; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+    #status { margin-top: 14px; min-height: 24px; font-weight: 600; }
+    small { display: block; margin-top: 14px; opacity: 0.7; }
+    @media (max-width: 620px) {
+      .row, .controls { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Article Reader</h1>
+    <p>Paste an article URL. The page extracts readable text and reads it aloud using your phone or browser voice.</p>
+
+    <label for="url">Article URL</label>
+    <input id="url" type="url" placeholder="https://example.com/article" autocomplete="url" />
+
+    <div class="row">
+      <div>
+        <label for="voice">Voice</label>
+        <select id="voice"></select>
+      </div>
+      <div>
+        <label for="rate">Speed: <span id="rateValue">1.0</span>x</label>
+        <input id="rate" type="range" min="0.7" max="1.3" step="0.05" value="1" />
+      </div>
+    </div>
+
+    <button class="primary" id="loadButton">Load and read</button>
+
+    <div class="controls">
+      <button id="pauseButton" disabled>Pause</button>
+      <button id="resumeButton" disabled>Resume</button>
+      <button id="stopButton" disabled>Stop</button>
+    </div>
+
+    <div id="status"></div>
+
+    <label for="text">Extracted text</label>
+    <textarea id="text" placeholder="Article text will appear here. You can also paste text manually and press Read pasted text."></textarea>
+    <button id="readTextButton">Read pasted text</button>
+
+    <small>
+      GitHub Pages cannot run a private backend, so this version uses the browser's built-in speech synthesis instead of OpenAI TTS. Article extraction uses Jina Reader by prefixing the URL with https://r.jina.ai/; some sites may block extraction or hit rate limits.
+    </small>
+  </main>
+
+  <script>
+    const urlInput = document.getElementById("url");
+    const voiceSelect = document.getElementById("voice");
+    const rateInput = document.getElementById("rate");
+    const rateValue = document.getElementById("rateValue");
+    const textArea = document.getElementById("text");
+    const statusEl = document.getElementById("status");
+    const loadButton = document.getElementById("loadButton");
+    const readTextButton = document.getElementById("readTextButton");
+    const pauseButton = document.getElementById("pauseButton");
+    const resumeButton = document.getElementById("resumeButton");
+    const stopButton = document.getElementById("stopButton");
+
+    let voices = [];
+    let chunks = [];
+    let chunkIndex = 0;
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+    }
+
+    function loadVoices() {
+      voices = speechSynthesis.getVoices();
+      voiceSelect.innerHTML = "";
+
+      const professionalVoices = voices
+        .filter(v => /en/i.test(v.lang))
+        .concat(voices.filter(v => !/en/i.test(v.lang)));
+
+      professionalVoices.forEach((voice, index) => {
+        const option = document.createElement("option");
+        option.value = voices.indexOf(voice);
+        option.textContent = `${voice.name} (${voice.lang})`;
+        if (index === 0) option.selected = true;
+        voiceSelect.appendChild(option);
+      });
+    }
+
+    function cleanArticle(raw) {
+      return raw
+        .replace(/^Title:.*$/gmi, "")
+        .replace(/^URL Source:.*$/gmi, "")
+        .replace(/^Markdown Content:.*$/gmi, "")
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+        .replace(/#{1,6}\s*/g, "")
+        .replace(/\*\*|__/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function splitText(text) {
+      const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+      const result = [];
+      let current = "";
+
+      for (const sentence of sentences) {
+        if ((current + sentence).length > 1400) {
+          if (current) result.push(current.trim());
+          current = sentence;
+        } else {
+          current += " " + sentence;
+        }
+      }
+
+      if (current.trim()) result.push(current.trim());
+      return result;
+    }
+
+    function selectedVoice() {
+      return voices[Number(voiceSelect.value)] || null;
+    }
+
+    function updateControls(reading) {
+      pauseButton.disabled = !reading;
+      resumeButton.disabled = !reading;
+      stopButton.disabled = !reading;
+    }
+
+    function speakChunks() {
+      if (chunkIndex >= chunks.length) {
+        setStatus("Finished reading.");
+        updateControls(false);
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(chunks[chunkIndex]);
+      utterance.voice = selectedVoice();
+      utterance.rate = Number(rateInput.value);
+      utterance.pitch = 1;
+      utterance.volume = 1;
+
+      utterance.onend = () => {
+        chunkIndex += 1;
+        speakChunks();
+      };
+
+      utterance.onerror = () => {
+        setStatus("Speech playback failed. Try another voice.");
+        updateControls(false);
+      };
+
+      setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
+      speechSynthesis.speak(utterance);
+    }
+
+    function readText(text) {
+      const cleaned = text.replace(/\s+/g, " ").trim();
+      if (!cleaned) {
+        setStatus("Paste or load article text first.");
+        return;
+      }
+
+      speechSynthesis.cancel();
+      chunks = splitText(cleaned);
+      chunkIndex = 0;
+      updateControls(true);
+      speakChunks();
+    }
+
+    async function loadArticle() {
+      const url = urlInput.value.trim();
+      if (!/^https?:\/\//i.test(url)) {
+        setStatus("Enter a valid article URL starting with http or https.");
+        return;
+      }
+
+      loadButton.disabled = true;
+      setStatus("Extracting article text...");
+
+      try {
+        const readerUrl = `https://r.jina.ai/${url}`;
+        const response = await fetch(readerUrl);
+        if (!response.ok) throw new Error("Could not extract this article.");
+
+        const raw = await response.text();
+        const text = cleanArticle(raw);
+        if (text.length < 80) throw new Error("The extracted article was too short.");
+
+        textArea.value = text;
+        readText(text);
+      } catch (error) {
+        setStatus(`${error.message} You can paste the article text manually below.`);
+      } finally {
+        loadButton.disabled = false;
+      }
+    }
+
+    rateInput.addEventListener("input", () => {
+      rateValue.textContent = Number(rateInput.value).toFixed(2);
+    });
+
+    loadButton.addEventListener("click", loadArticle);
+    readTextButton.addEventListener("click", () => readText(textArea.value));
+    pauseButton.addEventListener("click", () => speechSynthesis.pause());
+    resumeButton.addEventListener("click", () => speechSynthesis.resume());
+    stopButton.addEventListener("click", () => {
+      speechSynthesis.cancel();
+      updateControls(false);
+      setStatus("Stopped.");
+    });
+
+    loadVoices();
+    speechSynthesis.onvoiceschanged = loadVoices;
+  </script>
+</body>
+</html>

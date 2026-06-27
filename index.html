@@ -6,51 +6,96 @@
   <title>Article Reader</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%8A%3C/text%3E%3C/svg%3E" />
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light dark;
+      --accent: #6d5efc;
+      --accent-2: #b14bf4;
+      --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+      --ring: color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+    * { box-sizing: border-box; }
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       max-width: 760px;
       margin: 0 auto;
-      padding: 32px 18px;
-      line-height: 1.5;
+      padding: 28px 16px 56px;
+      line-height: 1.55;
+      background: radial-gradient(1100px 420px at 50% -160px,
+        color-mix(in srgb, var(--accent) 24%, transparent), transparent);
     }
     .card {
-      border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
-      border-radius: 16px;
-      padding: 22px;
-      box-shadow: 0 8px 28px rgb(0 0 0 / 0.08);
+      border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+      border-radius: 18px;
+      padding: 24px;
+      background: color-mix(in srgb, Canvas 94%, var(--accent) 4%);
+      box-shadow: 0 14px 44px rgb(0 0 0 / 0.12);
     }
-    h1 { margin: 0 0 8px; font-size: 30px; }
-    p { margin: 0 0 18px; opacity: 0.78; }
-    label { display: block; font-weight: 650; margin: 18px 0 8px; }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 30px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    p.intro { margin: 0 0 20px; opacity: 0.75; }
+    label { display: block; font-weight: 650; margin: 16px 0 7px; }
     input, select, textarea, button {
       width: 100%;
       box-sizing: border-box;
       font: inherit;
-      border-radius: 10px;
-      border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      border-radius: 11px;
+      border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
       padding: 12px;
       background: Canvas;
       color: CanvasText;
     }
-    textarea { min-height: 180px; resize: vertical; }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--ring);
+    }
+    input[type="range"] {
+      border: none; background: transparent; padding: 0;
+      accent-color: var(--accent);
+    }
+    textarea { min-height: 150px; resize: vertical; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     button {
       cursor: pointer;
       margin-top: 12px;
       font-weight: 700;
+      border: none;
+      transition: transform .05s ease, filter .15s ease, background .2s ease;
     }
-    button.primary { background: CanvasText; color: Canvas; }
-    button:disabled { opacity: 0.55; cursor: not-allowed; }
-    .controls { display: grid; grid-template-columns: 1fr 1.4fr 1fr; gap: 10px; margin-top: 10px; }
-    button.toggle { font-size: 22px; line-height: 1; padding: 10px; }
-    .premium {
-      margin-top: 18px;
-      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
-      border-radius: 12px;
+    button:active { transform: translateY(1px); }
+    button.primary {
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      color: #fff;
+      box-shadow: 0 6px 18px var(--accent-soft);
+    }
+    button.primary:hover { filter: brightness(1.06); }
+    #readTextButton { background: color-mix(in srgb, var(--accent) 12%, Canvas); color: CanvasText; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+    .controls { display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 10px; margin-top: 14px; }
+    button.toggle {
+      font-size: 22px; line-height: 1; padding: 12px;
+      background: color-mix(in srgb, var(--accent) 14%, Canvas);
+      color: CanvasText;
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    button.toggle:not(:disabled):hover { background: color-mix(in srgb, var(--accent) 24%, Canvas); }
+    #playPauseButton:not(:disabled) {
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      color: #fff; border: none;
+    }
+    .premium, details.manual {
+      margin-top: 16px;
+      border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+      border-radius: 13px;
       padding: 12px 14px;
     }
-    .premium summary { font-weight: 650; cursor: pointer; }
+    summary { font-weight: 650; cursor: pointer; }
     .premium .row { margin-top: 8px; }
     .premium .check {
       display: flex; align-items: center; gap: 8px;
@@ -58,17 +103,49 @@
     }
     .premium .check input { width: auto; }
     .premium input[type="password"] { margin-top: 6px; }
-    #status { margin-top: 14px; min-height: 24px; font-weight: 600; }
-    small { display: block; margin-top: 14px; opacity: 0.7; }
+    #status {
+      margin-top: 14px; min-height: 22px; font-weight: 600;
+      color: var(--accent);
+    }
+    /* Reading view: shows the article split into chunks, highlighting the one
+       currently being spoken and auto-scrolling it into view. */
+    #reader {
+      margin-top: 16px;
+      max-height: 44vh;
+      overflow-y: auto;
+      padding: 4px;
+      border-radius: 12px;
+      display: none;
+      scrollbar-width: thin;
+    }
+    #reader.active { display: block; }
+    .chunk {
+      display: block;
+      padding: 10px 14px;
+      margin: 6px 0;
+      border-radius: 10px;
+      border-left: 3px solid transparent;
+      opacity: 0.55;
+      cursor: pointer;
+      transition: background .2s ease, opacity .2s ease;
+    }
+    .chunk:hover { opacity: 0.85; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .chunk.active {
+      opacity: 1;
+      background: var(--accent-soft);
+      border-left-color: var(--accent);
+      font-weight: 500;
+    }
     @media (max-width: 620px) {
-      .row, .controls { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; }
+      .card { padding: 18px; }
     }
   </style>
 </head>
 <body>
   <main class="card">
     <h1>Article Reader</h1>
-    <p>Paste an article URL. The page extracts readable text and reads it aloud using your phone or browser voice.</p>
+    <p class="intro">Paste an article URL. The page extracts the readable text and reads it aloud in a natural voice.</p>
 
     <label for="url">Article URL</label>
     <input id="url" type="url" placeholder="https://example.com/article" autocomplete="url" />
@@ -85,27 +162,26 @@
     </div>
 
     <details class="premium" id="premiumSection">
-      <summary>Premium voices (Cloudflare)</summary>
+      <summary>Premium voices</summary>
       <label class="check">
-        <input type="checkbox" id="cfEnable" /> Use Cloudflare voice
+        <input type="checkbox" id="cfEnable" /> Use premium voice
       </label>
       <div class="row">
         <div>
           <label for="cfModel">Model</label>
           <select id="cfModel">
             <option value="melotts">MeloTTS — English (high volume)</option>
-            <option value="aura-1">Deepgram Aura-1 — natural voices</option>
-            <option value="aura-2">Deepgram Aura-2 — best quality</option>
+            <option value="aura-1">Aura-1 — natural voices</option>
+            <option value="aura-2">Aura-2 — best quality</option>
           </select>
         </div>
         <div>
-          <label for="cfVoice">Aura voice</label>
+          <label for="cfVoice">Voice</label>
           <select id="cfVoice" disabled></select>
         </div>
       </div>
       <label for="cfKey">Access key</label>
-      <input id="cfKey" type="password" placeholder="Your Worker access key" autocomplete="off" />
-      <small>Stored only in this browser. Article text is sent to Cloudflare for synthesis.</small>
+      <input id="cfKey" type="password" placeholder="Your access key" autocomplete="off" />
     </details>
 
     <button class="primary" id="loadButton">Load and read</button>
@@ -118,13 +194,14 @@
 
     <div id="status"></div>
 
-    <label for="text">Extracted text</label>
-    <textarea id="text" placeholder="Article text will appear here. You can also paste text manually and press Read pasted text."></textarea>
-    <button id="readTextButton">Read pasted text</button>
+    <div id="reader"></div>
 
-    <small>
-      GitHub Pages cannot run a private backend, so this version uses the browser's built-in speech synthesis instead of OpenAI TTS. Article extraction uses Jina Reader by prefixing the URL with https://r.jina.ai/; some sites may block extraction or hit rate limits.
-    </small>
+    <details class="manual">
+      <summary>Paste or edit text manually</summary>
+      <label for="text">Article text</label>
+      <textarea id="text" placeholder="Paste article text here, then press Read this text."></textarea>
+      <button id="readTextButton">Read this text</button>
+    </details>
   </main>
 
   <script>
@@ -134,6 +211,7 @@
     const rateValue = document.getElementById("rateValue");
     const textArea = document.getElementById("text");
     const statusEl = document.getElementById("status");
+    const readerEl = document.getElementById("reader");
     const loadButton = document.getElementById("loadButton");
     const readTextButton = document.getElementById("readTextButton");
     const prevButton = document.getElementById("prevButton");
@@ -171,6 +249,7 @@
     let voices = [];
     let chunks = [];
     let chunkIndex = 0;
+    let chunkEls = [];            // rendered chunk elements in the reading view
 
     function activeEngine() {
       return cfEnable.checked ? "cloudflare" : "browser";
@@ -271,6 +350,27 @@
       nextButton.disabled = playbackState === "idle" || chunkIndex >= chunks.length - 1;
     }
 
+    // Render the article into the reading view, one clickable block per chunk.
+    function renderChunks() {
+      readerEl.innerHTML = "";
+      chunkEls = chunks.map((text, i) => {
+        const el = document.createElement("span");
+        el.className = "chunk";
+        el.textContent = text;
+        el.addEventListener("click", () => playFrom(i));
+        readerEl.appendChild(el);
+        return el;
+      });
+      readerEl.classList.toggle("active", chunks.length > 0);
+    }
+
+    // Highlight the chunk being spoken and scroll it into view.
+    function highlightChunk(i) {
+      chunkEls.forEach((el, idx) => el.classList.toggle("active", idx === i));
+      const el = chunkEls[i];
+      if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+
     function speakChunks() {
       if (chunkIndex >= chunks.length) {
         setStatus("Finished reading.");
@@ -307,6 +407,7 @@
       };
 
       currentUtterance = utterance;
+      highlightChunk(chunkIndex);
       setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
       speechSynthesis.speak(utterance);
     }
@@ -333,12 +434,12 @@
 
     function handleCfError(error) {
       if (error.code === "no-key") {
-        setStatus("Enter your Cloudflare access key.");
+        setStatus("Enter your premium access key.");
         cfKey.focus();
       } else if (error.code === "unauthorized") {
         setStatus("Access key rejected — check your key.");
       } else {
-        setStatus("Cloudflare voice failed. Retry, or use a built-in voice.");
+        setStatus("Premium voice failed. Retry, or use a built-in voice.");
       }
       setControls("idle");
     }
@@ -350,6 +451,7 @@
         return;
       }
       const token = ++cfPlayToken;
+      highlightChunk(chunkIndex);
       setStatus(`Generating audio (part ${chunkIndex + 1} of ${chunks.length})...`);
       try {
         const blob = await fetchCfAudio(chunks[chunkIndex]);
@@ -426,6 +528,7 @@
       stopAll();
       chunks = splitText(cleaned, engine === "cloudflare" ? CF_CHUNK : BROWSER_CHUNK);
       chunkIndex = 0;
+      renderChunks();
       // Optimistically enable controls; the engine confirms "playing".
       setControls("playing");
       if (engine === "cloudflare") {
@@ -467,9 +570,16 @@
 
     rateInput.addEventListener("input", () => {
       rateValue.textContent = Number(rateInput.value).toFixed(2);
-      // Cloudflare audio supports live speed changes; speechSynthesis only
-      // picks up the new rate on the next chunk.
+      // Premium audio supports live speed changes; apply instantly.
       if (currentAudio) currentAudio.playbackRate = Number(rateInput.value);
+    });
+
+    // speechSynthesis can't change rate mid-utterance, so on release re-speak
+    // the current chunk at the new speed (only while actively playing).
+    rateInput.addEventListener("change", () => {
+      if (playbackState === "playing" && activeEngine() === "browser") {
+        playFrom(chunkIndex);
+      }
     });
 
     loadButton.addEventListener("click", loadArticle);

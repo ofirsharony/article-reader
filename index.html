@@ -427,16 +427,29 @@
         .replace(/^Markdown Content:.*$/gmi, "")
         .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
         .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-        .replace(/#{1,6}\s*/g, "")
+        .replace(/^#{1,6}\s+/gm, "")    // markdown heading markers (not "C#"/"#1")
         .replace(/\*\*|__/g, "");
-      return normalizeForSpeech(stripped).replace(/\s+/g, " ").trim();
+      const normalized = normalizeForSpeech(stripped);
+      // Jina text mode puts each paragraph/heading on its own line. Append a
+      // period to lines lacking terminal punctuation (mostly headings and list
+      // items) so the voice pauses instead of running them into the next line.
+      return normalized
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(Boolean)
+        .map(l => /[.!?…:;)\]"'’”]$/.test(l) ? l : l + ".")
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
     }
 
     // Remove leftover bits that get read aloud awkwardly: reference markers,
     // editorial notes, and navigation remnants.
     function normalizeForSpeech(text) {
       return text
-        .replace(/\bJump to (?:content|navigation|search)\b/gi, "")
+        .replace(/\b(?:Jump|Skip) to (?:main )?(?:content|navigation|search)\b/gi, "")
+        // Standalone ad/label lines (not the word mid-sentence).
+        .replace(/^[ \t]*(?:advertisement|sponsored(?: content)?|promoted content)[ \t]*$/gim, "")
         .replace(/\[\d+\](?:\[\d+\])*/g, "")  // [12] or [12][13] reference marks
         .replace(/\[[^\]]*\b(?:citation|edit|when|update|clarif\w*|source|verification|dead link|page needed|according to whom|by whom|vague|note)\b[^\]]*\]/gi, "")
         .replace(/\[(?:\?|…|\.\.\.)\]/g, "");
@@ -790,7 +803,16 @@
           headers: {
             "X-Return-Format": "text",
             "X-Retain-Images": "none",
-            "X-Remove-Selector": "nav,header,footer,form,aside,[role=navigation],[role=banner],[role=contentinfo]",
+            // Structural landmarks (safe everywhere) + conventional boilerplate
+            // class names. Deliberately NOT <table> — old sites use it for layout.
+            "X-Remove-Selector": [
+              "nav", "header", "footer", "form", "aside",
+              "[role=navigation]", "[role=banner]", "[role=contentinfo]",
+              "[role=search]", "[role=complementary]", "[role=dialog]",
+              ".infobox", ".navbox", ".toc", ".sidebar", ".breadcrumb", ".breadcrumbs",
+              ".cookie", ".cookies", ".newsletter", ".advertisement", ".advert", ".ads", ".promo",
+              ".social", ".social-share", ".share", ".sharing", ".related", ".related-articles",
+            ].join(","),
           },
         });
         if (!response.ok) throw new Error("Could not extract this article.");

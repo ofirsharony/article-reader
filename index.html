@@ -77,7 +77,7 @@
     button.primary:hover { filter: brightness(1.06); }
     #readTextButton { background: color-mix(in srgb, var(--accent) 12%, Canvas); color: CanvasText; }
     button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
-    .controls { display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 10px; margin-top: 14px; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr 1.6fr 1fr; gap: 8px; margin-top: 14px; }
     button.toggle {
       font-size: 22px; line-height: 1; padding: 12px;
       background: color-mix(in srgb, var(--accent) 14%, Canvas);
@@ -153,6 +153,19 @@
       border-left-color: var(--accent);
       font-weight: 500;
     }
+    /* Per-word highlight (browser engine where onboundary is supported). */
+    .chunk .word-active {
+      background: color-mix(in srgb, var(--accent) 38%, transparent);
+      border-radius: 4px;
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    #eta {
+      margin-top: 6px;
+      min-height: 16px;
+      font-size: 13px;
+      opacity: 0.7;
+      text-align: right;
+    }
     @media (max-width: 620px) {
       .row { grid-template-columns: 1fr; }
       .card { padding: 18px; }
@@ -204,14 +217,16 @@
     <button class="primary" id="loadButton">Load and read</button>
 
     <div class="controls">
+      <button id="restartButton" class="toggle" disabled aria-label="Restart from beginning" title="Restart from beginning">&#8634;</button>
       <button id="prevButton" class="toggle" disabled aria-label="Previous">&#9198;</button>
       <button id="playPauseButton" class="toggle" disabled aria-label="Play">&#9654;</button>
       <button id="nextButton" class="toggle" disabled aria-label="Next">&#9197;</button>
     </div>
 
     <div id="progress" aria-hidden="true"><div id="progressBar"></div></div>
+    <div id="eta" aria-hidden="true"></div>
 
-    <div id="status"></div>
+    <div id="status" aria-live="polite"></div>
 
     <div id="reader"></div>
 
@@ -233,8 +248,10 @@
     const readerEl = document.getElementById("reader");
     const progressEl = document.getElementById("progress");
     const progressBar = document.getElementById("progressBar");
+    const etaEl = document.getElementById("eta");
     const loadButton = document.getElementById("loadButton");
     const readTextButton = document.getElementById("readTextButton");
+    const restartButton = document.getElementById("restartButton");
     const prevButton = document.getElementById("prevButton");
     const playPauseButton = document.getElementById("playPauseButton");
     const nextButton = document.getElementById("nextButton");
@@ -262,6 +279,7 @@
     ];
     const BROWSER_CHUNK = 1400;  // speechSynthesis: large chunks for smoothness
     const CF_CHUNK = 500;        // Cloudflare: smaller chunks cut first-audio latency
+    const CHARS_PER_SEC = 15;    // rough TTS reading speed at rate 1.0, for ETA
 
     const PLAY_ICON = "▶";   // ▶
     const PAUSE_ICON = "⏸";  // ⏸
@@ -276,7 +294,12 @@
     let chunkIndex = 0;
     let chunkEls = [];            // rendered chunk elements in the reading view
     let currentUrl = "";          // article URL for resume tracking ("" = pasted text)
+    let articleTitle = "Article"; // for the lock-screen / media metadata
     const audioCache = new Map(); // key `${model}|${voice}|${text}` -> Blob (session only)
+
+    // Per-word highlighting state (browser engine, where onboundary fires).
+    let currentWordSpans = [];    // [{ start, end, el }] for the active chunk
+    let wordSpanIndex = -1;       // which chunk currently has word spans
 
     function activeEngine() {
       return cfEnable.checked ? "cloudflare" : "browser";
@@ -443,12 +466,14 @@
         playing ? "Pause" : state === "paused" ? "Resume" : "Play"
       );
       updateNav();
+      updateMediaSession();
     }
 
     function updateNav() {
       // Prev/Next available whenever something is loaded (playing or paused).
       prevButton.disabled = playbackState === "idle" || chunkIndex <= 0;
       nextButton.disabled = playbackState === "idle" || chunkIndex >= chunks.length - 1;
+      restartButton.disabled = playbackState === "idle";
     }
 
     // Render the article into the reading view, one clickable block per chunk.
@@ -470,16 +495,71 @@
     function updateProgress() {
       const pct = chunks.length ? ((chunkIndex + 1) / chunks.length) * 100 : 0;
       progressBar.style.width = pct + "%";
+      updateEta();
+    }
+
+    // Rough estimate of time left, based on characters remaining and speed.
+    function updateEta() {
+      if (!chunks.length || playbackState === "idle") { etaEl.textContent = ""; return; }
+      let remaining = 0;
+      for (let i = chunkIndex; i < chunks.length; i++) remaining += chunks[i].length;
+      const rate = Number(rateInput.value) || 1;
+      const secs = remaining / (CHARS_PER_SEC * rate);
+      etaEl.textContent = secs >= 90
+        ? `~${Math.round(secs / 60)} min left`
+        : `~${Math.max(1, Math.round(secs))} sec left`;
+    }
+
+    // --- Per-word highlighting (browser engine) ----------------------------
+
+    // Restore the word-spanned chunk back to plain text.
+    function clearWordSpans() {
+      if (wordSpanIndex >= 0 && chunkEls[wordSpanIndex]) {
+        chunkEls[wordSpanIndex].textContent = chunks[wordSpanIndex];
+      }
+      currentWordSpans = [];
+      wordSpanIndex = -1;
+    }
+
+    // Split the active chunk into word spans so onboundary can highlight one.
+    function buildWordSpans(index) {
+      const el = chunkEls[index];
+      if (!el) return;
+      const text = chunks[index];
+      el.textContent = "";
+      const spans = [];
+      const re = /\S+/g;
+      let m, last = 0;
+      while ((m = re.exec(text))) {
+        if (m.index > last) el.appendChild(document.createTextNode(text.slice(last, m.index)));
+        const span = document.createElement("span");
+        span.className = "word";
+        span.textContent = m[0];
+        el.appendChild(span);
+        spans.push({ start: m.index, end: m.index + m[0].length, el: span });
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
+      currentWordSpans = spans;
+      wordSpanIndex = index;
+    }
+
+    function highlightWordAt(charIndex) {
+      const w = currentWordSpans.find(s => charIndex >= s.start && charIndex < s.end);
+      if (!w) return;
+      currentWordSpans.forEach(s => s.el.classList.toggle("word-active", s === w));
     }
 
     // Highlight the chunk being spoken, scroll it into view, track progress,
     // and remember the position so the article can resume later.
     function highlightChunk(i) {
+      clearWordSpans();
       chunkEls.forEach((el, idx) => el.classList.toggle("active", idx === i));
       const el = chunkEls[i];
       if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
       updateProgress();
       savePosition();
+      updateMediaSession();
     }
 
     function speakChunks() {
@@ -502,6 +582,14 @@
       utterance.onpause = () => setControls("paused");
       utterance.onresume = () => setControls("playing");
 
+      // Word-level highlight where supported (Android Chrome, desktop).
+      // iOS Safari doesn't fire onboundary, so it simply stays chunk-level.
+      utterance.onboundary = (event) => {
+        if (utterance !== currentUtterance) return;
+        if (event.name && event.name !== "word") return;
+        highlightWordAt(event.charIndex);
+      };
+
       utterance.onend = () => {
         // Ignore the end event of an utterance we've already replaced (e.g. via
         // prev/next or a re-read) so navigation can't double-advance the index.
@@ -520,6 +608,7 @@
 
       currentUtterance = utterance;
       highlightChunk(chunkIndex);
+      buildWordSpans(chunkIndex);  // no-op visually until onboundary fires
       setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
       speechSynthesis.speak(utterance);
     }
@@ -620,6 +709,7 @@
         URL.revokeObjectURL(currentObjectUrl);
         currentObjectUrl = null;
       }
+      clearWordSpans();
     }
 
     // Jump to a chunk and play from there (used by prev/next and re-reads).
@@ -677,6 +767,10 @@
         const text = cleanArticle(raw);
         if (text.length < 80) throw new Error("The extracted article was too short.");
 
+        // Jina prefixes the output with "Title: ..."; use it for media metadata.
+        const titleMatch = raw.match(/^Title:\s*(.+)$/mi);
+        articleTitle = titleMatch ? titleMatch[1].trim() : "Article";
+
         textArea.value = text;
         currentUrl = url;
         // Resume where this article was last left off, if recent.
@@ -712,6 +806,7 @@
     loadButton.addEventListener("click", loadArticle);
     readTextButton.addEventListener("click", () => {
       currentUrl = "";  // pasted text isn't tied to a URL, so don't resume it
+      articleTitle = "Pasted text";
       readText(textArea.value);
     });
 
@@ -723,7 +818,7 @@
     }
     voiceSelect.addEventListener("change", () => { savePrefs(); reReadIfLoaded(); });
 
-    playPauseButton.addEventListener("click", () => {
+    function togglePlayPause() {
       if (playbackState === "playing") {
         if (activeEngine() === "cloudflare") {
           if (currentAudio) currentAudio.pause();
@@ -739,9 +834,59 @@
         }
         setControls("playing");
       }
-    });
+    }
+    playPauseButton.addEventListener("click", togglePlayPause);
+    restartButton.addEventListener("click", () => playFrom(0));
     prevButton.addEventListener("click", () => playFrom(chunkIndex - 1));
     nextButton.addEventListener("click", () => playFrom(chunkIndex + 1));
+
+    // Keyboard shortcuts: Space/K play-pause, arrows skip. Ignored while typing.
+    document.addEventListener("keydown", (e) => {
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
+                t.tagName === "SELECT" || t.tagName === "BUTTON" ||
+                t.isContentEditable)) return;
+      if (playbackState === "idle") return;
+      if (e.key === " " || e.key === "k") {
+        e.preventDefault();
+        togglePlayPause();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        if (!prevButton.disabled) playFrom(chunkIndex - 1);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        if (!nextButton.disabled) playFrom(chunkIndex + 1);
+      }
+    });
+
+    // --- Media Session (lock-screen / headphone controls) ------------------
+    // Works for premium audio on all platforms; for the browser voice it
+    // appears where the platform attaches a media session to speech.
+    function setupMediaSession() {
+      if (!("mediaSession" in navigator)) return;
+      const ms = navigator.mediaSession;
+      const set = (action, fn) => { try { ms.setActionHandler(action, fn); } catch {} };
+      set("play", () => { if (playbackState === "paused") togglePlayPause(); });
+      set("pause", () => { if (playbackState === "playing") togglePlayPause(); });
+      set("previoustrack", () => { if (!prevButton.disabled) playFrom(chunkIndex - 1); });
+      set("nexttrack", () => { if (!nextButton.disabled) playFrom(chunkIndex + 1); });
+      set("seekbackward", () => { if (!prevButton.disabled) playFrom(chunkIndex - 1); });
+      set("seekforward", () => { if (!nextButton.disabled) playFrom(chunkIndex + 1); });
+    }
+
+    function updateMediaSession() {
+      if (!("mediaSession" in navigator)) return;
+      navigator.mediaSession.playbackState =
+        playbackState === "playing" ? "playing" :
+        playbackState === "paused" ? "paused" : "none";
+      if (chunks.length && "MediaMetadata" in window) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: articleTitle || "Article",
+          artist: `Part ${chunkIndex + 1} of ${chunks.length}`,
+          album: "Article Reader",
+        });
+      }
+    }
 
     // --- Premium (Cloudflare) controls ------------------------------------
 
@@ -787,6 +932,7 @@
     setControls("idle");
     loadVoices();
     speechSynthesis.onvoiceschanged = loadVoices;
+    setupMediaSession();
   </script>
 </body>
 </html>

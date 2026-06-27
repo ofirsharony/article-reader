@@ -94,7 +94,8 @@
           <label for="cfModel">Model</label>
           <select id="cfModel">
             <option value="melotts">MeloTTS — English (high volume)</option>
-            <option value="aura-1">Deepgram Aura — natural voices</option>
+            <option value="aura-1">Deepgram Aura-1 — natural voices</option>
+            <option value="aura-2">Deepgram Aura-2 — best quality</option>
           </select>
         </div>
         <div>
@@ -147,9 +148,14 @@
     // the access key protects it.
     const CF_WORKER_URL = "https://article-reader-tts.article-reader.workers.dev";
     const CF_KEY_STORAGE = "cf_access_key";
+    // Curated, narration-friendly US voices only (no Irish/British/heavy accents).
     const AURA_VOICES = [
-      "asteria", "luna", "stella", "athena", "hera", "orion",
-      "arcas", "perseus", "angus", "orpheus", "helios", "zeus",
+      "asteria", "luna", "stella", "hera",   // female
+      "orion", "arcas", "perseus", "zeus",   // male
+    ];
+    const AURA2_VOICES = [
+      "luna", "asteria", "aurora", "hera",   // female
+      "apollo", "orion", "orpheus", "zeus",  // male
     ];
     const BROWSER_CHUNK = 1400;  // speechSynthesis: large chunks for smoothness
     const CF_CHUNK = 500;        // Cloudflare: smaller chunks cut first-audio latency
@@ -188,8 +194,13 @@
         "Wobble", "Zarvox"
       ]);
 
+      // Only neutral English accents — keep US and UK, drop Irish (en-IE),
+      // Australian (en-AU), Indian (en-IN), South African (en-ZA), etc.
+      const allowedLocales = new Set(["en-us", "en-gb"]);
+
       const englishVoices = voices.filter(v => {
-        if (!v.lang.toLowerCase().startsWith("en")) return false;
+        const locale = v.lang.toLowerCase().replace("_", "-");
+        if (!allowedLocales.has(locale)) return false;
         const baseName = v.name.split(" (")[0].trim();
         return !noveltyVoices.has(baseName);
       });
@@ -494,8 +505,9 @@
     // --- Premium (Cloudflare) controls ------------------------------------
 
     function populateAuraVoices() {
+      const list = cfModel.value === "aura-2" ? AURA2_VOICES : AURA_VOICES;
       cfVoice.innerHTML = "";
-      AURA_VOICES.forEach((name, i) => {
+      list.forEach((name, i) => {
         const o = document.createElement("option");
         o.value = name;
         o.textContent = name.charAt(0).toUpperCase() + name.slice(1);
@@ -505,8 +517,9 @@
     }
 
     function syncCfModelUi() {
-      // Aura has selectable voices; MeloTTS does not.
-      cfVoice.disabled = cfModel.value !== "aura-1";
+      // Aura models have selectable voices; MeloTTS does not.
+      cfVoice.disabled = cfModel.value === "melotts";
+      populateAuraVoices();
     }
 
     cfEnable.addEventListener("change", reReadIfLoaded);

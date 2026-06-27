@@ -22,6 +22,18 @@ const AURA_VOICES = new Set([
 ]);
 const DEFAULT_AURA_VOICE = "asteria";
 
+// Known Deepgram Aura-2 English voices (allowlist). Larger, newer voice set.
+const AURA2_VOICES = new Set([
+  "amalthea", "andromeda", "apollo", "arcas", "aries", "asteria",
+  "athena", "atlas", "aurora", "callista", "cora", "cordelia",
+  "delia", "draco", "electra", "harmonia", "helena", "hera",
+  "hermes", "hyperion", "iris", "janus", "juno", "jupiter",
+  "luna", "mars", "minerva", "neptune", "odysseus", "ophelia",
+  "orion", "orpheus", "pandora", "phoebe", "pluto", "saturn",
+  "thalia", "theia", "vesta", "zeus",
+]);
+const DEFAULT_AURA2_VOICE = "luna";
+
 function corsHeaders(request) {
   const origin = request.headers.get("Origin") || "";
   const allowOrigin = ALLOWED_ORIGINS.has(origin) ? origin : DEFAULT_ORIGIN;
@@ -102,6 +114,11 @@ export default {
       aiModel = "@cf/deepgram/aura-1";
       let voice = (body.voice || DEFAULT_AURA_VOICE).toString();
       if (!AURA_VOICES.has(voice)) voice = DEFAULT_AURA_VOICE;
+      input = { text, speaker: voice };
+    } else if (model === "aura-2") {
+      aiModel = "@cf/deepgram/aura-2-en";
+      let voice = (body.voice || DEFAULT_AURA2_VOICE).toString();
+      if (!AURA2_VOICES.has(voice)) voice = DEFAULT_AURA2_VOICE;
       input = { text, speaker: voice };
     } else {
       return json(request, 400, { error: "model_not_allowed" });

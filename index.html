@@ -429,7 +429,7 @@
         .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
         .replace(/^#{1,6}\s+/gm, "")    // markdown heading markers (not "C#"/"#1")
         .replace(/\*\*|__/g, "");
-      const normalized = normalizeForSpeech(stripped);
+      const normalized = expandForSpeech(normalizeForSpeech(stripped));
       // Jina text mode puts each paragraph/heading on its own line. Append a
       // period to lines lacking terminal punctuation (mostly headings and list
       // items) so the voice pauses instead of running them into the next line.
@@ -453,6 +453,40 @@
         .replace(/\[\d+\](?:\[\d+\])*/g, "")  // [12] or [12][13] reference marks
         .replace(/\[[^\]]*\b(?:citation|edit|when|update|clarif\w*|source|verification|dead link|page needed|according to whom|by whom|vague|note)\b[^\]]*\]/gi, "")
         .replace(/\[(?:\?|…|\.\.\.)\]/g, "");
+    }
+
+    // Expand symbols, currencies, and common abbreviations into words so the
+    // voice says them naturally ("50%" -> "50 percent") instead of spelling
+    // them out or mispronouncing them. Conservative to avoid wrong guesses.
+    function expandForSpeech(text) {
+      return text
+        // strip emoji / pictographs / arrows (read aloud as "smiling face" etc.)
+        .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{1F1E6}-\u{1F1FF}]/gu, "")
+        // common Latin abbreviations (also drops the period that breaks pauses)
+        .replace(/\be\.g\.\s*/gi, "for example ")
+        .replace(/\bi\.e\.\s*/gi, "that is ")
+        .replace(/\betc\b\.?/gi, "et cetera")
+        .replace(/\bvs\b\.?/gi, "versus")
+        // currency: scale-word form first, then plain amounts
+        .replace(/\$\s?(\d[\d,]*(?:\.\d+)?)\s+(trillion|billion|million|thousand)\b/gi, "$1 $2 dollars")
+        .replace(/\$\s?(\d[\d,]*(?:\.\d+)?)/g, "$1 dollars")
+        .replace(/€\s?(\d[\d,]*(?:\.\d+)?)/g, "$1 euros")
+        .replace(/£\s?(\d[\d,]*(?:\.\d+)?)/g, "$1 pounds")
+        // percent
+        .replace(/(\d)\s*%/g, "$1 percent")
+        // ampersand
+        .replace(/\s*&\s*/g, " and ")
+        // numeric ranges (en/em dash, or spaced hyphen) -> "to"; leaves ISO
+        // dates like 2025-08-27 untouched (plain hyphen, no spaces)
+        .replace(/(\d)\s*[–—]\s*(\d)/g, "$1 to $2")
+        .replace(/(\d)\s+-\s+(\d)/g, "$1 to $2")
+        // "#5" -> "number 5" (leaves "C#" alone)
+        .replace(/#(\d)/g, "number $1")
+        // degrees
+        .replace(/°\s?([CF])\b/g, " degrees $1")
+        .replace(/°/g, " degrees ")
+        // collapse repeated terminal punctuation ("!!!" -> "!")
+        .replace(/([!?])\1+/g, "$1");
     }
 
     // Build a readable title from a URL slug when Jina gives no Title: line.

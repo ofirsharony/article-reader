@@ -103,8 +103,25 @@
     }
     .premium .check input { width: auto; }
     .premium input[type="password"] { margin-top: 6px; }
+    /* Progress bar across the whole article. */
+    #progress {
+      margin-top: 14px;
+      height: 6px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--accent) 16%, transparent);
+      overflow: hidden;
+      display: none;
+    }
+    #progress.active { display: block; }
+    #progressBar {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width .3s ease;
+    }
     #status {
-      margin-top: 14px; min-height: 22px; font-weight: 600;
+      margin-top: 12px; min-height: 22px; font-weight: 600;
       color: var(--accent);
     }
     /* Reading view: shows the article split into chunks, highlighting the one
@@ -192,6 +209,8 @@
       <button id="nextButton" class="toggle" disabled aria-label="Next">&#9197;</button>
     </div>
 
+    <div id="progress" aria-hidden="true"><div id="progressBar"></div></div>
+
     <div id="status"></div>
 
     <div id="reader"></div>
@@ -212,6 +231,8 @@
     const textArea = document.getElementById("text");
     const statusEl = document.getElementById("status");
     const readerEl = document.getElementById("reader");
+    const progressEl = document.getElementById("progress");
+    const progressBar = document.getElementById("progressBar");
     const loadButton = document.getElementById("loadButton");
     const readTextButton = document.getElementById("readTextButton");
     const prevButton = document.getElementById("prevButton");
@@ -226,6 +247,10 @@
     // the access key protects it.
     const CF_WORKER_URL = "https://article-reader-tts.article-reader.workers.dev";
     const CF_KEY_STORAGE = "cf_access_key";
+    const PREFS_STORAGE = "ar_prefs";        // saved voice/speed/model choices
+    const POS_STORAGE = "ar_positions";      // per-URL resume positions
+    const POS_TTL_MS = 7 * 24 * 60 * 60 * 1000;  // forget resume points after 7 days
+    const AUDIO_CACHE_MAX = 40;              // in-memory premium-audio cache cap
     // Curated, narration-friendly US voices only (no Irish/British/heavy accents).
     const AURA_VOICES = [
       "asteria", "luna", "stella", "hera",   // female
@@ -250,6 +275,8 @@
     let chunks = [];
     let chunkIndex = 0;
     let chunkEls = [];            // rendered chunk elements in the reading view
+    let currentUrl = "";          // article URL for resume tracking ("" = pasted text)
+    const audioCache = new Map(); // key `${model}|${voice}|${text}` -> Blob (session only)
 
     function activeEngine() {
       return cfEnable.checked ? "cloudflare" : "browser";
@@ -257,6 +284,73 @@
 
     function setStatus(message) {
       statusEl.textContent = message;
+    }
+
+    // --- Persistence (preferences + resume position) -----------------------
+    // localStorage has no built-in expiry, so prefs persist indefinitely.
+    // Resume positions carry a timestamp and are pruned after POS_TTL_MS.
+
+    function loadJson(key) {
+      try { return JSON.parse(localStorage.getItem(key)) || {}; }
+      catch { return {}; }
+    }
+
+    function savePrefs() {
+      localStorage.setItem(PREFS_STORAGE, JSON.stringify({
+        voice: voiceSelect.selectedOptions[0]?.textContent || "",
+        rate: rateInput.value,
+        cfEnable: cfEnable.checked,
+        cfModel: cfModel.value,
+        cfVoice: cfVoice.value,
+      }));
+    }
+
+    function savePosition() {
+      if (!currentUrl || !chunks.length) return;
+      const all = loadJson(POS_STORAGE);
+      all[currentUrl] = { index: chunkIndex, total: chunks.length, t: Date.now() };
+      // Prune entries older than the TTL so the store can't grow forever.
+      const now = Date.now();
+      for (const k of Object.keys(all)) {
+        if (now - (all[k].t || 0) > POS_TTL_MS) delete all[k];
+      }
+      localStorage.setItem(POS_STORAGE, JSON.stringify(all));
+    }
+
+    function getPosition(url) {
+      const p = loadJson(POS_STORAGE)[url];
+      if (!p || Date.now() - (p.t || 0) > POS_TTL_MS) return null;
+      return p;
+    }
+
+    function clearPosition() {
+      if (!currentUrl) return;
+      const all = loadJson(POS_STORAGE);
+      delete all[currentUrl];
+      localStorage.setItem(POS_STORAGE, JSON.stringify(all));
+    }
+
+    // --- Premium audio cache (in-memory, this page session only) -----------
+
+    function cfCacheKey(text) {
+      return `${cfModel.value}|${cfVoice.value}|${text}`;
+    }
+
+    function cacheAudio(key, blob) {
+      audioCache.set(key, blob);
+      // Simple FIFO eviction once we exceed the cap.
+      while (audioCache.size > AUDIO_CACHE_MAX) {
+        audioCache.delete(audioCache.keys().next().value);
+      }
+    }
+
+    // Warm the cache for the next chunk while the current one plays.
+    function prefetchNext() {
+      const next = chunkIndex + 1;
+      if (next >= chunks.length) return;
+      const key = `${cfModel.value}|${cfVoice.value}|${chunks[next]}`;
+      if (audioCache.has(key)) return;
+      fetchCfAudio(chunks[next]).catch(() => {});  // best effort; ignore errors
     }
 
     function loadVoices() {
@@ -291,6 +385,13 @@
         if (index === 0) option.selected = true;
         voiceSelect.appendChild(option);
       });
+
+      // Restore the previously chosen voice, if it's still available.
+      const savedVoice = loadJson(PREFS_STORAGE).voice;
+      if (savedVoice) {
+        const opt = [...voiceSelect.options].find(o => o.textContent === savedVoice);
+        if (opt) voiceSelect.value = opt.value;
+      }
     }
 
     function cleanArticle(raw) {
@@ -362,13 +463,23 @@
         return el;
       });
       readerEl.classList.toggle("active", chunks.length > 0);
+      progressEl.classList.toggle("active", chunks.length > 0);
+      updateProgress();
     }
 
-    // Highlight the chunk being spoken and scroll it into view.
+    function updateProgress() {
+      const pct = chunks.length ? ((chunkIndex + 1) / chunks.length) * 100 : 0;
+      progressBar.style.width = pct + "%";
+    }
+
+    // Highlight the chunk being spoken, scroll it into view, track progress,
+    // and remember the position so the article can resume later.
     function highlightChunk(i) {
       chunkEls.forEach((el, idx) => el.classList.toggle("active", idx === i));
       const el = chunkEls[i];
       if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+      updateProgress();
+      savePosition();
     }
 
     function speakChunks() {
@@ -376,6 +487,7 @@
         setStatus("Finished reading.");
         setControls("idle");
         updateNav();
+        clearPosition();
         return;
       }
 
@@ -415,6 +527,10 @@
     // --- Cloudflare engine -------------------------------------------------
 
     async function fetchCfAudio(text) {
+      // Reuse already-generated audio (saves latency and daily quota).
+      const cacheKey = cfCacheKey(text);
+      if (audioCache.has(cacheKey)) return audioCache.get(cacheKey);
+
       const key = cfKey.value.trim();
       if (!key) { const e = new Error("no-key"); e.code = "no-key"; throw e; }
       const res = await fetch(CF_WORKER_URL, {
@@ -429,7 +545,9 @@
       });
       if (res.status === 401) { const e = new Error("unauthorized"); e.code = "unauthorized"; throw e; }
       if (!res.ok) { const e = new Error("server"); e.code = "server"; throw e; }
-      return await res.blob();
+      const blob = await res.blob();
+      cacheAudio(cacheKey, blob);
+      return blob;
     }
 
     function handleCfError(error) {
@@ -448,6 +566,7 @@
       if (chunkIndex >= chunks.length) {
         setStatus("Finished reading.");
         setControls("idle");
+        clearPosition();
         return;
       }
       const token = ++cfPlayToken;
@@ -477,6 +596,7 @@
         if (token !== cfPlayToken) return;
         setControls("playing");
         setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
+        prefetchNext();  // warm the next chunk to avoid an audible gap
       } catch (error) {
         if (token !== cfPlayToken) return;
         handleCfError(error);
@@ -518,7 +638,7 @@
       }
     }
 
-    function readText(text) {
+    function readText(text, startIndex = 0) {
       const cleaned = text.replace(/\s+/g, " ").trim();
       if (!cleaned) {
         setStatus("Paste or load article text first.");
@@ -527,7 +647,7 @@
       const engine = activeEngine();
       stopAll();
       chunks = splitText(cleaned, engine === "cloudflare" ? CF_CHUNK : BROWSER_CHUNK);
-      chunkIndex = 0;
+      chunkIndex = Math.max(0, Math.min(startIndex, chunks.length - 1));
       renderChunks();
       // Optimistically enable controls; the engine confirms "playing".
       setControls("playing");
@@ -558,7 +678,13 @@
         if (text.length < 80) throw new Error("The extracted article was too short.");
 
         textArea.value = text;
-        readText(text);
+        currentUrl = url;
+        // Resume where this article was last left off, if recent.
+        const pos = getPosition(url);
+        readText(text, pos ? pos.index : 0);
+        if (pos && pos.index > 0) {
+          setStatus(`Resuming at part ${chunkIndex + 1} of ${chunks.length}...`);
+        }
       } catch (error) {
         // Extraction failed -> nothing will play, so make sure controls reflect idle.
         setControls("idle");
@@ -577,20 +703,25 @@
     // speechSynthesis can't change rate mid-utterance, so on release re-speak
     // the current chunk at the new speed (only while actively playing).
     rateInput.addEventListener("change", () => {
+      savePrefs();
       if (playbackState === "playing" && activeEngine() === "browser") {
         playFrom(chunkIndex);
       }
     });
 
     loadButton.addEventListener("click", loadArticle);
-    readTextButton.addEventListener("click", () => readText(textArea.value));
+    readTextButton.addEventListener("click", () => {
+      currentUrl = "";  // pasted text isn't tied to a URL, so don't resume it
+      readText(textArea.value);
+    });
 
     // Re-read the already-loaded text when the chosen voice/engine changes —
     // no need to re-fetch from Jina, since the content is in the textarea.
+    // Keep the current chunk so a voice/speed swap doesn't restart the article.
     function reReadIfLoaded() {
-      if (textArea.value.trim()) readText(textArea.value);
+      if (textArea.value.trim()) readText(textArea.value, chunkIndex);
     }
-    voiceSelect.addEventListener("change", reReadIfLoaded);
+    voiceSelect.addEventListener("change", () => { savePrefs(); reReadIfLoaded(); });
 
     playPauseButton.addEventListener("click", () => {
       if (playbackState === "playing") {
@@ -632,16 +763,25 @@
       populateAuraVoices();
     }
 
-    cfEnable.addEventListener("change", reReadIfLoaded);
-    cfModel.addEventListener("change", () => { syncCfModelUi(); reReadIfLoaded(); });
-    cfVoice.addEventListener("change", reReadIfLoaded);
+    cfEnable.addEventListener("change", () => { savePrefs(); reReadIfLoaded(); });
+    cfModel.addEventListener("change", () => { syncCfModelUi(); savePrefs(); reReadIfLoaded(); });
+    cfVoice.addEventListener("change", () => { savePrefs(); reReadIfLoaded(); });
     // Persist the access key locally; never leaves this browser except to the Worker.
     cfKey.addEventListener("change", () => {
       localStorage.setItem(CF_KEY_STORAGE, cfKey.value.trim());
     });
 
-    populateAuraVoices();
-    syncCfModelUi();
+    // Restore saved preferences (voice is restored later, in loadVoices).
+    const savedPrefs = loadJson(PREFS_STORAGE);
+    if (savedPrefs.rate) {
+      rateInput.value = savedPrefs.rate;
+      rateValue.textContent = Number(savedPrefs.rate).toFixed(2);
+    }
+    if (typeof savedPrefs.cfEnable === "boolean") cfEnable.checked = savedPrefs.cfEnable;
+    if (savedPrefs.cfModel) cfModel.value = savedPrefs.cfModel;
+    syncCfModelUi();  // sets the disabled state and populates voices for the model
+    if (savedPrefs.cfVoice) cfVoice.value = savedPrefs.cfVoice;  // restore after populate
+
     cfKey.value = localStorage.getItem(CF_KEY_STORAGE) || "";
 
     setControls("idle");

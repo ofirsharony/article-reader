@@ -418,16 +418,40 @@
     }
 
     function cleanArticle(raw) {
-      return raw
+      // Defensive markdown/preamble stripping (text mode removes most of this,
+      // but Jina sometimes still returns markdown or a Title: preamble).
+      const stripped = raw
         .replace(/^Title:.*$/gmi, "")
         .replace(/^URL Source:.*$/gmi, "")
+        .replace(/^Published Time:.*$/gmi, "")
         .replace(/^Markdown Content:.*$/gmi, "")
         .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
         .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
         .replace(/#{1,6}\s*/g, "")
-        .replace(/\*\*|__/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
+        .replace(/\*\*|__/g, "");
+      return normalizeForSpeech(stripped).replace(/\s+/g, " ").trim();
+    }
+
+    // Remove leftover bits that get read aloud awkwardly: reference markers,
+    // editorial notes, and navigation remnants.
+    function normalizeForSpeech(text) {
+      return text
+        .replace(/\bJump to (?:content|navigation|search)\b/gi, "")
+        .replace(/\[\d+\](?:\[\d+\])*/g, "")  // [12] or [12][13] reference marks
+        .replace(/\[[^\]]*\b(?:citation|edit|when|update|clarif\w*|source|verification|dead link|page needed|according to whom|by whom|vague|note)\b[^\]]*\]/gi, "")
+        .replace(/\[(?:\?|…|\.\.\.)\]/g, "");
+    }
+
+    // Build a readable title from a URL slug when Jina gives no Title: line.
+    function titleFromUrl(u) {
+      try {
+        const path = new URL(u).pathname.split("/").filter(Boolean).pop() || "";
+        const slug = decodeURIComponent(path)
+          .replace(/\.[a-z0-9]+$/i, "")
+          .replace(/[-_]+/g, " ")
+          .trim();
+        return slug ? slug.replace(/\b\w/g, c => c.toUpperCase()) : "Article";
+      } catch { return "Article"; }
     }
 
     function splitText(text, maxLen) {
@@ -760,16 +784,24 @@
 
       try {
         const readerUrl = `https://r.jina.ai/${url}`;
-        const response = await fetch(readerUrl);
+        // Ask Jina for clean plain text without images, and drop common page
+        // chrome (nav/header/footer/sidebars) so it isn't read aloud.
+        const response = await fetch(readerUrl, {
+          headers: {
+            "X-Return-Format": "text",
+            "X-Retain-Images": "none",
+            "X-Remove-Selector": "nav,header,footer,form,aside,[role=navigation],[role=banner],[role=contentinfo]",
+          },
+        });
         if (!response.ok) throw new Error("Could not extract this article.");
 
         const raw = await response.text();
         const text = cleanArticle(raw);
         if (text.length < 80) throw new Error("The extracted article was too short.");
 
-        // Jina prefixes the output with "Title: ..."; use it for media metadata.
+        // Use Jina's "Title:" line when present; otherwise derive from the URL.
         const titleMatch = raw.match(/^Title:\s*(.+)$/mi);
-        articleTitle = titleMatch ? titleMatch[1].trim() : "Article";
+        articleTitle = titleMatch ? titleMatch[1].trim() : titleFromUrl(url);
 
         textArea.value = text;
         currentUrl = url;

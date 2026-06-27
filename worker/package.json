@@ -1,0 +1,15 @@
+{
+  "name": "worker",
+  "version": "1.0.0",
+  "description": "A tiny Cloudflare Worker that proxies the Article Reader page to Cloudflare Workers AI text-to-speech (MeloTTS and Deepgram Aura-1), so the static page can use premium voices without exposing any Cloudflare API token.",
+  "main": "worker.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "wrangler": "^4.86.0"
+  }
+}

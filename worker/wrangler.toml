@@ -1,0 +1,10 @@
+name = "article-reader-tts"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Workers AI binding — authenticates as your account, so no API token is needed.
+[ai]
+binding = "AI"
+
+# ACCESS_KEY is NOT defined here. Set it as a secret instead:
+#   wrangler secret put ACCESS_KEY

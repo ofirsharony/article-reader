@@ -44,6 +44,20 @@
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     .controls { display: grid; grid-template-columns: 1fr 1.4fr 1fr; gap: 10px; margin-top: 10px; }
     button.toggle { font-size: 22px; line-height: 1; padding: 10px; }
+    .premium {
+      margin-top: 18px;
+      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .premium summary { font-weight: 650; cursor: pointer; }
+    .premium .row { margin-top: 8px; }
+    .premium .check {
+      display: flex; align-items: center; gap: 8px;
+      font-weight: 650; margin: 12px 0 4px;
+    }
+    .premium .check input { width: auto; }
+    .premium input[type="password"] { margin-top: 6px; }
     #status { margin-top: 14px; min-height: 24px; font-weight: 600; }
     small { display: block; margin-top: 14px; opacity: 0.7; }
     @media (max-width: 620px) {
@@ -69,6 +83,29 @@
         <input id="rate" type="range" min="0.7" max="1.3" step="0.05" value="1" />
       </div>
     </div>
+
+    <details class="premium" id="premiumSection">
+      <summary>Premium voices (Cloudflare)</summary>
+      <label class="check">
+        <input type="checkbox" id="cfEnable" /> Use Cloudflare voice
+      </label>
+      <div class="row">
+        <div>
+          <label for="cfModel">Model</label>
+          <select id="cfModel">
+            <option value="melotts">MeloTTS — English (high volume)</option>
+            <option value="aura-1">Deepgram Aura — natural voices</option>
+          </select>
+        </div>
+        <div>
+          <label for="cfVoice">Aura voice</label>
+          <select id="cfVoice" disabled></select>
+        </div>
+      </div>
+      <label for="cfKey">Access key</label>
+      <input id="cfKey" type="password" placeholder="Your Worker access key" autocomplete="off" />
+      <small>Stored only in this browser. Article text is sent to Cloudflare for synthesis.</small>
+    </details>
 
     <button class="primary" id="loadButton">Load and read</button>
 
@@ -101,15 +138,37 @@
     const prevButton = document.getElementById("prevButton");
     const playPauseButton = document.getElementById("playPauseButton");
     const nextButton = document.getElementById("nextButton");
+    const cfEnable = document.getElementById("cfEnable");
+    const cfModel = document.getElementById("cfModel");
+    const cfVoice = document.getElementById("cfVoice");
+    const cfKey = document.getElementById("cfKey");
+
+    // Set this to your deployed Worker URL (see worker/README.md). Not secret —
+    // the access key protects it.
+    const CF_WORKER_URL = "https://article-reader-tts.article-reader.workers.dev";
+    const CF_KEY_STORAGE = "cf_access_key";
+    const AURA_VOICES = [
+      "asteria", "luna", "stella", "athena", "hera", "orion",
+      "arcas", "perseus", "angus", "orpheus", "helios", "zeus",
+    ];
+    const BROWSER_CHUNK = 1400;  // speechSynthesis: large chunks for smoothness
+    const CF_CHUNK = 500;        // Cloudflare: smaller chunks cut first-audio latency
 
     const PLAY_ICON = "▶";   // ▶
     const PAUSE_ICON = "⏸";  // ⏸
     let playbackState = "idle";   // "idle" | "playing" | "paused"
-    let currentUtterance = null;
+    let currentUtterance = null;  // browser engine guard
+    let currentAudio = null;      // cloudflare engine <audio>
+    let currentObjectUrl = null;  // cloudflare engine blob URL (to revoke)
+    let cfPlayToken = 0;          // cloudflare async guard (discard stale fetches)
 
     let voices = [];
     let chunks = [];
     let chunkIndex = 0;
+
+    function activeEngine() {
+      return cfEnable.checked ? "cloudflare" : "browser";
+    }
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -157,13 +216,13 @@
         .trim();
     }
 
-    function splitText(text) {
+    function splitText(text, maxLen) {
       const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
       const result = [];
       let current = "";
 
       for (const sentence of sentences) {
-        if ((current + sentence).length > 1400) {
+        if ((current + sentence).length > maxLen) {
           if (current) result.push(current.trim());
           current = sentence;
         } else {
@@ -241,16 +300,109 @@
       speechSynthesis.speak(utterance);
     }
 
+    // --- Cloudflare engine -------------------------------------------------
+
+    async function fetchCfAudio(text) {
+      const key = cfKey.value.trim();
+      if (!key) { const e = new Error("no-key"); e.code = "no-key"; throw e; }
+      const res = await fetch(CF_WORKER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Access-Key": key },
+        body: JSON.stringify({
+          model: cfModel.value,
+          voice: cfVoice.value,
+          text,
+          lang: "en",
+        }),
+      });
+      if (res.status === 401) { const e = new Error("unauthorized"); e.code = "unauthorized"; throw e; }
+      if (!res.ok) { const e = new Error("server"); e.code = "server"; throw e; }
+      return await res.blob();
+    }
+
+    function handleCfError(error) {
+      if (error.code === "no-key") {
+        setStatus("Enter your Cloudflare access key.");
+        cfKey.focus();
+      } else if (error.code === "unauthorized") {
+        setStatus("Access key rejected — check your key.");
+      } else {
+        setStatus("Cloudflare voice failed. Retry, or use a built-in voice.");
+      }
+      setControls("idle");
+    }
+
+    async function playCloudflareChunk() {
+      if (chunkIndex >= chunks.length) {
+        setStatus("Finished reading.");
+        setControls("idle");
+        return;
+      }
+      const token = ++cfPlayToken;
+      setStatus(`Generating audio (part ${chunkIndex + 1} of ${chunks.length})...`);
+      try {
+        const blob = await fetchCfAudio(chunks[chunkIndex]);
+        if (token !== cfPlayToken) return;  // superseded by a skip/stop/re-read
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.playbackRate = Number(rateInput.value);
+        currentAudio = audio;
+        currentObjectUrl = url;
+
+        audio.onended = () => {
+          if (token !== cfPlayToken) return;
+          URL.revokeObjectURL(url);
+          chunkIndex += 1;
+          playCloudflareChunk();
+        };
+        audio.onerror = () => {
+          if (token !== cfPlayToken) return;
+          handleCfError(new Error("server"));
+        };
+
+        await audio.play();
+        if (token !== cfPlayToken) return;
+        setControls("playing");
+        setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
+      } catch (error) {
+        if (token !== cfPlayToken) return;
+        handleCfError(error);
+      }
+    }
+
+    // --- Shared playback ---------------------------------------------------
+
+    // Stop whichever engine is active and invalidate pending async work.
+    function stopAll() {
+      cfPlayToken++;
+      speechSynthesis.cancel();
+      currentUtterance = null;
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.onended = null;
+        currentAudio.onerror = null;
+        currentAudio = null;
+      }
+      if (currentObjectUrl) {
+        URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = null;
+      }
+    }
+
     // Jump to a chunk and play from there (used by prev/next and re-reads).
     function playFrom(index) {
       if (!chunks.length) return;
       chunkIndex = Math.max(0, Math.min(index, chunks.length - 1));
-      speechSynthesis.cancel();
+      stopAll();
       setControls("playing");
-      speakChunks();
-      // If we were paused before skipping, some engines stay paused after a
-      // cancel()+speak(); resume() is a no-op when already playing.
-      speechSynthesis.resume();
+      if (activeEngine() === "cloudflare") {
+        playCloudflareChunk();
+      } else {
+        speakChunks();
+        // If paused before skipping, some engines stay paused after
+        // cancel()+speak(); resume() is a no-op when already playing.
+        speechSynthesis.resume();
+      }
     }
 
     function readText(text) {
@@ -259,13 +411,17 @@
         setStatus("Paste or load article text first.");
         return;
       }
-
-      speechSynthesis.cancel();
-      chunks = splitText(cleaned);
+      const engine = activeEngine();
+      stopAll();
+      chunks = splitText(cleaned, engine === "cloudflare" ? CF_CHUNK : BROWSER_CHUNK);
       chunkIndex = 0;
-      // Optimistically enable controls; onstart will confirm "playing".
+      // Optimistically enable controls; the engine confirms "playing".
       setControls("playing");
-      speakChunks();
+      if (engine === "cloudflare") {
+        playCloudflareChunk();
+      } else {
+        speakChunks();
+      }
     }
 
     async function loadArticle() {
@@ -300,27 +456,70 @@
 
     rateInput.addEventListener("input", () => {
       rateValue.textContent = Number(rateInput.value).toFixed(2);
+      // Cloudflare audio supports live speed changes; speechSynthesis only
+      // picks up the new rate on the next chunk.
+      if (currentAudio) currentAudio.playbackRate = Number(rateInput.value);
     });
 
     loadButton.addEventListener("click", loadArticle);
     readTextButton.addEventListener("click", () => readText(textArea.value));
 
-    // Switching voice re-reads the text already loaded — no need to re-fetch
-    // from Jina, since the content is in the textarea.
-    voiceSelect.addEventListener("change", () => {
+    // Re-read the already-loaded text when the chosen voice/engine changes —
+    // no need to re-fetch from Jina, since the content is in the textarea.
+    function reReadIfLoaded() {
       if (textArea.value.trim()) readText(textArea.value);
-    });
+    }
+    voiceSelect.addEventListener("change", reReadIfLoaded);
+
     playPauseButton.addEventListener("click", () => {
       if (playbackState === "playing") {
-        speechSynthesis.pause();
+        if (activeEngine() === "cloudflare") {
+          if (currentAudio) currentAudio.pause();
+        } else {
+          speechSynthesis.pause();
+        }
         setControls("paused");
       } else if (playbackState === "paused") {
-        speechSynthesis.resume();
+        if (activeEngine() === "cloudflare") {
+          if (currentAudio) currentAudio.play();
+        } else {
+          speechSynthesis.resume();
+        }
         setControls("playing");
       }
     });
     prevButton.addEventListener("click", () => playFrom(chunkIndex - 1));
     nextButton.addEventListener("click", () => playFrom(chunkIndex + 1));
+
+    // --- Premium (Cloudflare) controls ------------------------------------
+
+    function populateAuraVoices() {
+      cfVoice.innerHTML = "";
+      AURA_VOICES.forEach((name, i) => {
+        const o = document.createElement("option");
+        o.value = name;
+        o.textContent = name.charAt(0).toUpperCase() + name.slice(1);
+        if (i === 0) o.selected = true;
+        cfVoice.appendChild(o);
+      });
+    }
+
+    function syncCfModelUi() {
+      // Aura has selectable voices; MeloTTS does not.
+      cfVoice.disabled = cfModel.value !== "aura-1";
+    }
+
+    cfEnable.addEventListener("change", reReadIfLoaded);
+    cfModel.addEventListener("change", () => { syncCfModelUi(); reReadIfLoaded(); });
+    cfVoice.addEventListener("change", reReadIfLoaded);
+    // Persist the access key locally; never leaves this browser except to the Worker.
+    cfKey.addEventListener("change", () => {
+      localStorage.setItem(CF_KEY_STORAGE, cfKey.value.trim());
+    });
+
+    populateAuraVoices();
+    syncCfModelUi();
+    cfKey.value = localStorage.getItem(CF_KEY_STORAGE) || "";
 
     setControls("idle");
     loadVoices();

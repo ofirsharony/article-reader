@@ -447,6 +447,11 @@
     // editorial notes, and navigation remnants.
     function normalizeForSpeech(text) {
       return text
+        // Leaked web-component <style> CSS (e.g. X/Twitter shadow DOM counters).
+        // Only strip rule-runs that contain CSS-only tokens (":host", minified
+        // declarations) so code blocks and JSON are left untouched.
+        .replace(/(?:[^{}\n]*\{[^{}]*\})+/g, m =>
+          /:host|white-space:|will-change:|display:inline-|line-height:|--[\w-]+:/.test(m) ? "" : m)
         .replace(/\b(?:Jump|Skip) to (?:main )?(?:content|navigation|search)\b/gi, "")
         // Standalone ad/label lines (not the word mid-sentence).
         .replace(/^[ \t]*(?:advertisement|sponsored(?: content)?|promoted content)[ \t]*$/gim, "")

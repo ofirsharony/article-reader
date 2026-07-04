@@ -142,8 +142,13 @@ export default {
         return audioResponse(request, bytes);
       }
       return json(request, 502, { error: "unexpected_model_output" });
-    } catch {
-      return json(request, 502, { error: "inference_failed" });
+    } catch (err) {
+      // Surface why inference failed (the access key already gates who can
+      // see this). Quota/capacity exhaustion gets its own status so the
+      // client can tell "out of free Neurons" apart from a transient error.
+      const detail = String((err && err.message) || err).slice(0, 200);
+      const isQuota = /quota|capacity|neurons|rate.?limit|exceeded|3040/i.test(detail);
+      return json(request, isQuota ? 429 : 502, { error: "inference_failed", detail });
     }
   },
 };

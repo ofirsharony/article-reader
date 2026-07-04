@@ -311,8 +311,7 @@
       "luna", "asteria", "aurora", "hera",   // female
       "apollo", "orion", "orpheus", "zeus",  // male
     ];
-    const BROWSER_CHUNK = 1400;  // speechSynthesis: large chunks for smoothness
-    const CF_CHUNK = 500;        // Cloudflare: smaller chunks cut first-audio latency
+    const CHUNK_SIZE = 500;      // both engines; also bounds premium first-audio latency
     const CHARS_PER_SEC = 15;    // rough TTS reading speed at rate 1.0, for ETA
 
     const PLAY_ICON = "▶";   // ▶
@@ -896,18 +895,34 @@
 
       const key = cfKey.value.trim();
       if (!key) { const e = new Error("no-key"); e.code = "no-key"; throw e; }
-      const res = await fetch(CF_WORKER_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Access-Key": key },
-        body: JSON.stringify({
-          model: cfModel.value,
-          voice: cfVoice.value,
-          text,
-          lang: "en",
-        }),
-      });
+      let res;
+      try {
+        res = await fetch(CF_WORKER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Access-Key": key },
+          body: JSON.stringify({
+            model: cfModel.value,
+            voice: cfVoice.value,
+            text,
+            lang: "en",
+          }),
+        });
+      } catch {
+        const e = new Error("network"); e.code = "network"; throw e;
+      }
       if (res.status === 401) { const e = new Error("unauthorized"); e.code = "unauthorized"; throw e; }
-      if (!res.ok) { const e = new Error("server"); e.code = "server"; throw e; }
+      if (!res.ok) {
+        // The Worker reports why: { error, detail }, with 429 for quota.
+        let body = null;
+        try { body = await res.json(); } catch {}
+        const detail = (body && body.detail) || (body && body.error) || "";
+        const quota = res.status === 429 || /quota|capacity|neurons|rate.?limit|exceeded/i.test(detail);
+        const e = new Error("server");
+        e.code = quota ? "quota" : "server";
+        e.detail = detail;
+        e.status = res.status;
+        throw e;
+      }
       const blob = await res.blob();
       cacheAudio(cacheKey, blob);
       return blob;
@@ -919,10 +934,41 @@
         cfKey.focus();
       } else if (error.code === "unauthorized") {
         setStatus("Access key rejected — check your key.");
+      } else if (error.code === "quota") {
+        setStatus("Premium voice failed: daily Workers AI quota reached. It resets at midnight UTC — until then, use a built-in voice.");
+      } else if (error.code === "network") {
+        setStatus("Premium voice failed: network error. Check your connection and retry.");
       } else {
-        setStatus("Premium voice failed. Retry, or use a built-in voice.");
+        const why = error.detail ? `: ${error.detail}` : (error.status ? ` (HTTP ${error.status})` : "");
+        setStatus(`Premium voice failed${why}. Retry, or use a built-in voice.`);
       }
       setControls("idle");
+    }
+
+    // When Workers AI quota/capacity runs out mid-article, degrade through
+    // the premium tiers (Aura-2 -> Aura-1 -> MeloTTS) and finally to the
+    // free browser voice, keeping the listening position. The short delay
+    // lets the user read the status message; the token guard drops the
+    // retry if they navigate or stop in the meantime.
+    function quotaFallback() {
+      const t = cfPlayToken;
+      const retry = (fn) => setTimeout(() => { if (t === cfPlayToken) fn(); }, 1500);
+      if (cfModel.value === "aura-2" || cfModel.value === "aura-1") {
+        const next = cfModel.value === "aura-2" ? "aura-1" : "melotts";
+        setStatus(`Premium quota reached for this voice — switching to ${next === "aura-1" ? "Aura-1" : "MeloTTS"}...`);
+        cfModel.value = next;
+        syncCfModelUi();
+        savePrefs();
+        retry(playCloudflareChunk);
+      } else {
+        setStatus("Premium quota reached — switching to the free browser voice...");
+        cfEnable.checked = false;
+        savePrefs();
+        // Re-chunk for the browser engine, mapping the position by characters
+        // (robust even if the engines' chunk sizes ever diverge again).
+        const consumed = chunks.slice(0, chunkIndex).reduce((n, c) => n + c.length + 1, 0) + chunkCharOffset;
+        retry(() => readText(textArea.value, 0, consumed));
+      }
     }
 
     async function playCloudflareChunk() {
@@ -971,6 +1017,10 @@
         if (error && error.name === "NotAllowedError") {
           setControls("paused");
           setStatus("Tap ▶ to start listening.");
+          return;
+        }
+        if (error && error.code === "quota") {
+          quotaFallback();
           return;
         }
         handleCfError(error);
@@ -1062,7 +1112,7 @@
       }
     }
 
-    function readText(text, startIndex = 0) {
+    function readText(text, startIndex = 0, startChar = null) {
       const cleaned = text.replace(/\s+/g, " ").trim();
       if (!cleaned) {
         setStatus("Paste or load article text first.");
@@ -1070,10 +1120,23 @@
       }
       const engine = activeEngine();
       stopAll();
-      chunks = splitText(cleaned, engine === "cloudflare" ? CF_CHUNK : BROWSER_CHUNK);
+      chunks = splitText(cleaned, CHUNK_SIZE);
       computeSentenceStarts();
       chunkIndex = Math.max(0, Math.min(startIndex, chunks.length - 1));
       chunkCharOffset = 0;
+      // A character-based start position (used when switching engines, whose
+      // chunk sizes differ) overrides the chunk index; snap to its sentence.
+      if (startChar != null) {
+        let acc = 0, idx = 0;
+        for (let i = 0; i < chunks.length; i++) {
+          idx = i;
+          if (startChar < acc + chunks[i].length) break;
+          acc += chunks[i].length + 1;
+        }
+        chunkIndex = idx;
+        const starts = sentenceStarts[idx] || [0];
+        chunkCharOffset = starts[sentenceIndexAt(idx, Math.max(0, startChar - acc))];
+      }
       renderChunks();
       // Optimistically enable controls; the engine confirms "playing".
       setControls("playing");
@@ -1126,9 +1189,13 @@
 
         textArea.value = text;
         currentUrl = url;
-        // Resume where this article was last left off, if recent.
+        // Resume where this article was last left off, if recent. Map the
+        // saved chunk position proportionally to characters, so it survives
+        // chunk-size changes (tuned constants, or a different engine).
         const pos = getPosition(url);
-        readText(text, pos ? pos.index : 0);
+        readText(text, 0, pos && pos.index > 0
+          ? Math.floor((pos.index / Math.max(pos.total || 1, 1)) * text.length)
+          : null);
         if (pos && pos.index > 0) {
           setStatus(`Resuming at part ${chunkIndex + 1} of ${chunks.length}...`);
         }
@@ -1166,9 +1233,12 @@
 
     // Re-read the already-loaded text when the chosen voice/engine changes —
     // no need to re-fetch from Jina, since the content is in the textarea.
-    // Keep the current chunk so a voice/speed swap doesn't restart the article.
+    // Keep the position by character count so it survives any re-chunking
+    // (a raw chunk index wouldn't if chunk sizing ever changes).
     function reReadIfLoaded() {
-      if (textArea.value.trim()) readText(textArea.value, chunkIndex);
+      if (!textArea.value.trim()) return;
+      const consumed = chunks.slice(0, chunkIndex).reduce((n, c) => n + c.length + 1, 0) + chunkCharOffset;
+      readText(textArea.value, 0, chunks.length ? consumed : null);
     }
     voiceSelect.addEventListener("change", () => { savePrefs(); reReadIfLoaded(); });
 

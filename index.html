@@ -186,6 +186,11 @@
       border-radius: 4px;
       box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
     }
+    /* Per-sentence highlight (premium engine, estimated from audio time). */
+    .chunk .sentence-active {
+      background: color-mix(in srgb, var(--accent) 22%, transparent);
+      border-radius: 4px;
+    }
     #eta {
       margin-top: 6px;
       min-height: 16px;
@@ -342,6 +347,11 @@
     // Per-word highlighting state (browser engine, where onboundary fires).
     let currentWordSpans = [];    // [{ start, end, el }] for the active chunk
     let wordSpanIndex = -1;       // which chunk currently has word spans
+
+    // Per-sentence highlighting state (premium engine, no boundary events —
+    // the position is estimated from audio time, so sentence granularity).
+    let currentSentenceSpans = [];  // [{ el }] per sentence of the active chunk
+    let sentenceSpanIndex = -1;     // which chunk currently has sentence spans
 
     function activeEngine() {
       return cfEnable.checked ? "cloudflare" : "browser";
@@ -773,13 +783,38 @@
 
     // --- Per-word highlighting (browser engine) ----------------------------
 
-    // Restore the word-spanned chunk back to plain text.
+    // Restore the word/sentence-spanned chunk back to plain text.
     function clearWordSpans() {
       if (wordSpanIndex >= 0 && chunkEls[wordSpanIndex]) {
         chunkEls[wordSpanIndex].textContent = chunks[wordSpanIndex];
       }
       currentWordSpans = [];
       wordSpanIndex = -1;
+      if (sentenceSpanIndex >= 0 && chunkEls[sentenceSpanIndex]) {
+        chunkEls[sentenceSpanIndex].textContent = chunks[sentenceSpanIndex];
+      }
+      currentSentenceSpans = [];
+      sentenceSpanIndex = -1;
+    }
+
+    // Split the active chunk into one span per sentence (their text nodes
+    // still concatenate to the full chunk text, so tap-to-sentence keeps
+    // working). The first segment starts at 0 to cover any leading space.
+    function buildSentenceSpans(index) {
+      const el = chunkEls[index];
+      if (!el) return;
+      const text = chunks[index];
+      const starts = sentenceStarts[index] || [0];
+      el.textContent = "";
+      currentSentenceSpans = starts.map((s, j) => {
+        const from = j === 0 ? 0 : s;
+        const to = j + 1 < starts.length ? starts[j + 1] : text.length;
+        const span = document.createElement("span");
+        span.textContent = text.slice(from, to);
+        el.appendChild(span);
+        return { el: span };
+      });
+      sentenceSpanIndex = index;
     }
 
     // Split the active chunk into word spans so onboundary can highlight one.
@@ -980,6 +1015,7 @@
       }
       const token = ++cfPlayToken;
       highlightChunk(chunkIndex);
+      buildSentenceSpans(chunkIndex);  // highlighted as the audio progresses
       setStatus(`Generating audio (part ${chunkIndex + 1} of ${chunks.length})...`);
       try {
         const blob = await fetchCfAudio(chunks[chunkIndex]);
@@ -1059,6 +1095,17 @@
     // when the user comes back if we're still playing.
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") syncWakeLock();
+    });
+
+    // Highlight the sentence currently being spoken by the premium engine,
+    // estimated from playback time (fires ~4x/sec — plenty for sentences).
+    cfAudio.addEventListener("timeupdate", () => {
+      if (sentenceSpanIndex !== chunkIndex || !currentSentenceSpans.length) return;
+      const d = cfAudio.duration;
+      if (!isFinite(d) || d <= 0) return;
+      const pos = (cfAudio.currentTime / d) * chunks[chunkIndex].length;
+      const si = sentenceIndexAt(chunkIndex, pos);
+      currentSentenceSpans.forEach((s, j) => s.el.classList.toggle("sentence-active", j === si));
     });
 
     // --- Shared playback ---------------------------------------------------

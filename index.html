@@ -352,6 +352,7 @@
     // the position is estimated from audio time, so sentence granularity).
     let currentSentenceSpans = [];  // [{ el }] per sentence of the active chunk
     let sentenceSpanIndex = -1;     // which chunk currently has sentence spans
+    let speechTickTimer = null;     // browser-engine fallback highlight timer
 
     function activeEngine() {
       return cfEnable.checked ? "cloudflare" : "browser";
@@ -815,6 +816,37 @@
         return { el: span };
       });
       sentenceSpanIndex = index;
+      // The word spans (if any) were just replaced by the sentence spans.
+      if (wordSpanIndex === index) { currentWordSpans = []; wordSpanIndex = -1; }
+    }
+
+    // Some browser voices never fire onboundary (Android Chrome's network
+    // voices, iOS Safari). After a short grace period with no boundary events,
+    // fall back to time-estimated sentence highlighting, like the premium
+    // engine. The estimate also feeds lastBoundaryAbs so sentence prev/next
+    // stays roughly in sync.
+    const SPEECH_CHARS_PER_SEC = 15;  // ~180 wpm at rate 1
+    function startSpeechTick(utterance, startOffset, hasBoundary) {
+      clearInterval(speechTickTimer);
+      let lastTick = Date.now();
+      let played = 0;  // ms actually speaking (excludes paused time)
+      speechTickTimer = setInterval(() => {
+        if (utterance !== currentUtterance || hasBoundary()) {
+          clearInterval(speechTickTimer);
+          return;
+        }
+        const now = Date.now();
+        if (!speechSynthesis.paused) played += now - lastTick;
+        lastTick = now;
+        if (played < 1500) return;  // grace: real boundary events start immediately
+        if (sentenceSpanIndex !== chunkIndex) buildSentenceSpans(chunkIndex);
+        const pos = Math.min(
+          startOffset + (played / 1000) * SPEECH_CHARS_PER_SEC * Number(rateInput.value),
+          chunks[chunkIndex].length - 1);
+        lastBoundaryAbs = pos;
+        const si = sentenceIndexAt(chunkIndex, pos);
+        currentSentenceSpans.forEach((s, j) => s.el.classList.toggle("sentence-active", j === si));
+      }, 300);
     }
 
     // Split the active chunk into word spans so onboundary can highlight one.
@@ -838,6 +870,7 @@
       if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
       currentWordSpans = spans;
       wordSpanIndex = index;
+      if (sentenceSpanIndex === index) { currentSentenceSpans = []; sentenceSpanIndex = -1; }
     }
 
     function highlightWordAt(charIndex) {
@@ -860,6 +893,7 @@
 
     function speakChunks() {
       if (chunkIndex >= chunks.length) {
+        clearInterval(speechTickTimer);
         setStatus("Finished reading.");
         setControls("idle");
         updateNav();
@@ -877,15 +911,24 @@
       utterance.volume = 1;
 
       // Keep the controls in sync with what the speech engine actually does.
-      utterance.onstart = () => { lastBoundaryAbs = startOffset; setControls("playing"); updateNav(); };
+      utterance.onstart = () => {
+        lastBoundaryAbs = startOffset;
+        setControls("playing");
+        updateNav();
+        startSpeechTick(utterance, startOffset, () => boundaryFired);
+      };
       utterance.onpause = () => setControls("paused");
       utterance.onresume = () => setControls("playing");
 
-      // Word-level highlight where supported (Android Chrome, desktop).
-      // iOS Safari doesn't fire onboundary, so it simply stays chunk-level.
+      // Word-level highlight where supported; voices with no boundary events
+      // get the time-estimated sentence fallback from startSpeechTick instead.
+      let boundaryFired = false;
       utterance.onboundary = (event) => {
         if (utterance !== currentUtterance) return;
         if (event.name && event.name !== "word") return;
+        boundaryFired = true;
+        // If the fallback already swapped in sentence spans, restore word spans.
+        if (sentenceSpanIndex === chunkIndex) buildWordSpans(chunkIndex);
         lastBoundaryAbs = startOffset + event.charIndex;
         highlightWordAt(startOffset + event.charIndex);
       };
@@ -1113,6 +1156,7 @@
     // Stop whichever engine is active and invalidate pending async work.
     function stopAll() {
       cfPlayToken++;
+      clearInterval(speechTickTimer);
       speechSynthesis.cancel();
       currentUtterance = null;
       // Reset (don't discard) the persistent premium element so it keeps its

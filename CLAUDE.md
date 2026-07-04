@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A static web app (`index.html`) that extracts article text from a URL and reads it aloud, plus an optional Cloudflare Worker (`worker/`) that proxies premium text-to-speech. The page is deployed as-is to GitHub Pages — no build step, no dependencies, no tests. All HTML, CSS, and JS live inline in `index.html`.
 
+It's an installable PWA: `manifest.webmanifest` registers an Android share target (shared links arrive as GET params — usually in `text`, not `url` — handled by `handleSharedUrl()` in `index.html`), and `sw.js` is a minimal network-first service worker required for installability. A share navigation has no user gesture, so both engines treat blocked autoplay (`not-allowed` / `NotAllowedError`) as "paused, tap play" rather than an error. Icons live in `icons/` (root `/*.png` is gitignored; `icons/` is not).
+
 ## Running and testing
 
 Open `index.html` directly in a browser, or serve the directory (e.g. `python3 -m http.server`) and reload after changes. Deploying the page is just uploading `index.html` (and `README.md`) to a repo root with GitHub Pages serving from the `main` branch root.
@@ -25,6 +27,6 @@ The Worker is deployed separately with wrangler from `worker/` (`npx wrangler de
 
 **Shared playback state** — module-level `chunks` / `chunkIndex` / `playbackState` (`idle | playing | paused`) drive everything: the clickable chunk reading view (`renderChunks()` / `highlightChunk()`), progress bar + ETA, prev/next/restart controls, keyboard shortcuts (Space/K, arrows), and the Media Session API (lock-screen controls).
 
-**Persistence (localStorage)** — voice/speed/model prefs (`ar_prefs`), per-URL resume positions pruned after 7 days (`ar_positions`), and the premium access key (`cf_access_key`, stays client-side; sent only to the Worker).
+**Persistence (localStorage)** — voice/speed/model prefs (`ar_prefs`), per-URL resume positions + article titles pruned after 7 days (`ar_positions`), and the premium access key (`cf_access_key`, stays client-side; sent only to the Worker). The "recently played" list (`renderRecent()`) is a UI over `ar_positions`: in-progress articles, tap to resume; finishing an article clears its entry.
 
 **The Worker** (`worker/worker.js`, single file) — gates on `X-Access-Key` (timing-safe compare), allowlists models (MeloTTS, Aura-1, Aura-2) and voices, caps text at 2000 chars, pins CORS to the GitHub Pages origin + localhost, and calls Workers AI through the `AI` binding so no Cloudflare API token exists anywhere. The client's voice lists in `index.html` are a curated subset of the Worker's allowlists — keep them in sync when adding voices.

@@ -285,7 +285,10 @@
     const PAUSE_ICON = "⏸";  // ⏸
     let playbackState = "idle";   // "idle" | "playing" | "paused"
     let currentUtterance = null;  // browser engine guard
-    let currentAudio = null;      // cloudflare engine <audio>
+    // One persistent element for all premium audio, unlocked by the user's
+    // first tap. Reusing it (instead of new Audio() per chunk) is what lets
+    // background .play() calls succeed on Android once the screen is off.
+    const cfAudio = new Audio();
     let currentObjectUrl = null;  // cloudflare engine blob URL (to revoke)
     let cfPlayToken = 0;          // cloudflare async guard (discard stale fetches)
 
@@ -543,11 +546,13 @@
       );
       updateNav();
       updateMediaSession();
+      syncWakeLock();
     }
 
     function updateNav() {
       // Prev/Next available whenever something is loaded (playing or paused).
-      prevButton.disabled = playbackState === "idle" || chunkIndex <= 0;
+      // Prev stays enabled on the first section — it restarts the section.
+      prevButton.disabled = playbackState === "idle";
       nextButton.disabled = playbackState === "idle" || chunkIndex >= chunks.length - 1;
       restartButton.disabled = playbackState === "idle";
     }
@@ -740,24 +745,23 @@
       try {
         const blob = await fetchCfAudio(chunks[chunkIndex]);
         if (token !== cfPlayToken) return;  // superseded by a skip/stop/re-read
+        if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
         const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audio.playbackRate = Number(rateInput.value);
-        currentAudio = audio;
         currentObjectUrl = url;
+        cfAudio.src = url;  // loading resets playbackRate, so set it after
+        cfAudio.playbackRate = Number(rateInput.value);
 
-        audio.onended = () => {
+        cfAudio.onended = () => {
           if (token !== cfPlayToken) return;
-          URL.revokeObjectURL(url);
           chunkIndex += 1;
           playCloudflareChunk();
         };
-        audio.onerror = () => {
+        cfAudio.onerror = () => {
           if (token !== cfPlayToken) return;
           handleCfError(new Error("server"));
         };
 
-        await audio.play();
+        await cfAudio.play();
         if (token !== cfPlayToken) return;
         setControls("playing");
         setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
@@ -768,6 +772,40 @@
       }
     }
 
+    // --- Screen wake lock (browser engine only) ----------------------------
+    // speechSynthesis suspends when the screen locks — no web API can prevent
+    // that — so keep the screen awake while the browser voice is playing.
+    // Premium audio plays fine with the screen off, so it takes no lock.
+    // Best-effort: failures and unsupported browsers are silently ignored.
+    let wakeLock = null;
+
+    async function syncWakeLock() {
+      const want = playbackState === "playing" && activeEngine() === "browser";
+      if (want && !wakeLock && "wakeLock" in navigator) {
+        try {
+          const lock = await navigator.wakeLock.request("screen");
+          // Playback may have paused/stopped while the request was in flight.
+          if (playbackState === "playing" && activeEngine() === "browser") {
+            wakeLock = lock;
+            lock.addEventListener("release", () => {
+              if (wakeLock === lock) wakeLock = null;
+            });
+          } else {
+            lock.release().catch(() => {});
+          }
+        } catch {}
+      } else if (!want && wakeLock) {
+        wakeLock.release().catch(() => {});
+        wakeLock = null;
+      }
+    }
+
+    // The platform releases wake locks when the tab is hidden; re-acquire
+    // when the user comes back if we're still playing.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") syncWakeLock();
+    });
+
     // --- Shared playback ---------------------------------------------------
 
     // Stop whichever engine is active and invalidate pending async work.
@@ -775,17 +813,30 @@
       cfPlayToken++;
       speechSynthesis.cancel();
       currentUtterance = null;
-      if (currentAudio) {
-        currentAudio.pause();
-        currentAudio.onended = null;
-        currentAudio.onerror = null;
-        currentAudio = null;
-      }
+      // Reset (don't discard) the persistent premium element so it keeps its
+      // user-activation and can be replayed from the background.
+      cfAudio.pause();
+      cfAudio.onended = null;
+      cfAudio.onerror = null;
+      cfAudio.removeAttribute("src");
+      cfAudio.load();  // abort + release the current resource
       if (currentObjectUrl) {
         URL.revokeObjectURL(currentObjectUrl);
         currentObjectUrl = null;
       }
       clearWordSpans();
+    }
+
+    // Spotify-style prev: restart the current section; only a quick second
+    // press (within PREV_DOUBLE_MS) goes back to the previous section.
+    const PREV_DOUBLE_MS = 1000;
+    let lastPrevTime = 0;
+
+    function handlePrev() {
+      const now = Date.now();
+      const target = now - lastPrevTime < PREV_DOUBLE_MS ? chunkIndex - 1 : chunkIndex;
+      lastPrevTime = now;
+      playFrom(target);
     }
 
     // Jump to a chunk and play from there (used by prev/next and re-reads).
@@ -884,7 +935,7 @@
     rateInput.addEventListener("input", () => {
       rateValue.textContent = Number(rateInput.value).toFixed(2);
       // Premium audio supports live speed changes; apply instantly.
-      if (currentAudio) currentAudio.playbackRate = Number(rateInput.value);
+      cfAudio.playbackRate = Number(rateInput.value);
     });
 
     // speechSynthesis can't change rate mid-utterance, so on release re-speak
@@ -914,14 +965,14 @@
     function togglePlayPause() {
       if (playbackState === "playing") {
         if (activeEngine() === "cloudflare") {
-          if (currentAudio) currentAudio.pause();
+          cfAudio.pause();
         } else {
           speechSynthesis.pause();
         }
         setControls("paused");
       } else if (playbackState === "paused") {
         if (activeEngine() === "cloudflare") {
-          if (currentAudio) currentAudio.play();
+          cfAudio.play();
         } else {
           speechSynthesis.resume();
         }
@@ -930,7 +981,7 @@
     }
     playPauseButton.addEventListener("click", togglePlayPause);
     restartButton.addEventListener("click", () => playFrom(0));
-    prevButton.addEventListener("click", () => playFrom(chunkIndex - 1));
+    prevButton.addEventListener("click", handlePrev);
     nextButton.addEventListener("click", () => playFrom(chunkIndex + 1));
 
     // Keyboard shortcuts: Space/K play-pause, arrows skip. Ignored while typing.
@@ -945,7 +996,7 @@
         togglePlayPause();
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
-        if (!prevButton.disabled) playFrom(chunkIndex - 1);
+        if (!prevButton.disabled) handlePrev();
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         if (!nextButton.disabled) playFrom(chunkIndex + 1);
@@ -961,9 +1012,9 @@
       const set = (action, fn) => { try { ms.setActionHandler(action, fn); } catch {} };
       set("play", () => { if (playbackState === "paused") togglePlayPause(); });
       set("pause", () => { if (playbackState === "playing") togglePlayPause(); });
-      set("previoustrack", () => { if (!prevButton.disabled) playFrom(chunkIndex - 1); });
+      set("previoustrack", () => { if (!prevButton.disabled) handlePrev(); });
       set("nexttrack", () => { if (!nextButton.disabled) playFrom(chunkIndex + 1); });
-      set("seekbackward", () => { if (!prevButton.disabled) playFrom(chunkIndex - 1); });
+      set("seekbackward", () => { if (!prevButton.disabled) handlePrev(); });
       set("seekforward", () => { if (!nextButton.disabled) playFrom(chunkIndex + 1); });
     }
 

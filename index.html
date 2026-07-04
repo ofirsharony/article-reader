@@ -79,7 +79,7 @@
     button.primary:hover { filter: brightness(1.06); }
     #readTextButton { background: color-mix(in srgb, var(--accent) 12%, Canvas); color: CanvasText; }
     button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
-    .controls { display: grid; grid-template-columns: 1fr 1fr 1.6fr 1fr; gap: 8px; margin-top: 14px; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr 1fr 1.6fr 1fr 1fr; gap: 8px; margin-top: 14px; }
     button.toggle {
       font-size: 22px; line-height: 1; padding: 12px;
       background: color-mix(in srgb, var(--accent) 14%, Canvas);
@@ -105,12 +105,16 @@
     }
     .premium .check input { width: auto; }
     .premium input[type="password"] { margin-top: 6px; }
-    /* Progress bar across the whole article. */
+    /* Progress bar across the whole article. Tappable to seek: the visible
+       track is 6px; vertical padding widens the touch target invisibly. */
     #progress {
       margin-top: 14px;
-      height: 6px;
+      height: 18px;
+      padding: 6px 0;
       border-radius: 999px;
       background: color-mix(in srgb, var(--accent) 16%, transparent);
+      background-clip: content-box;
+      cursor: pointer;
       overflow: hidden;
       display: none;
     }
@@ -243,12 +247,14 @@
 
     <div class="controls">
       <button id="restartButton" class="toggle" disabled aria-label="Restart from beginning" title="Restart from beginning">&#8634;</button>
-      <button id="prevButton" class="toggle" disabled aria-label="Previous">&#9198;</button>
+      <button id="prevButton" class="toggle" disabled aria-label="Previous section" title="Previous section">&#9198;</button>
+      <button id="prevSentenceButton" class="toggle" disabled aria-label="Previous sentence" title="Previous sentence">&#8249;</button>
       <button id="playPauseButton" class="toggle" disabled aria-label="Play">&#9654;</button>
-      <button id="nextButton" class="toggle" disabled aria-label="Next">&#9197;</button>
+      <button id="nextSentenceButton" class="toggle" disabled aria-label="Next sentence" title="Next sentence">&#8250;</button>
+      <button id="nextButton" class="toggle" disabled aria-label="Next section" title="Next section">&#9197;</button>
     </div>
 
-    <div id="progress" aria-hidden="true"><div id="progressBar"></div></div>
+    <div id="progress" aria-label="Seek to a position in the article" title="Tap to seek"><div id="progressBar"></div></div>
     <div id="eta" aria-hidden="true"></div>
 
     <div id="status" aria-live="polite"></div>
@@ -279,6 +285,8 @@
     const readTextButton = document.getElementById("readTextButton");
     const restartButton = document.getElementById("restartButton");
     const prevButton = document.getElementById("prevButton");
+    const prevSentenceButton = document.getElementById("prevSentenceButton");
+    const nextSentenceButton = document.getElementById("nextSentenceButton");
     const playPauseButton = document.getElementById("playPauseButton");
     const nextButton = document.getElementById("nextButton");
     const cfEnable = document.getElementById("cfEnable");
@@ -321,6 +329,12 @@
     let voices = [];
     let chunks = [];
     let chunkIndex = 0;
+    // Sentence-level position within the current chunk. chunkCharOffset is
+    // where playback of this chunk started (0 = chunk start); lastBoundaryAbs
+    // tracks the browser engine's spoken position via onboundary events.
+    let chunkCharOffset = 0;
+    let lastBoundaryAbs = 0;
+    let sentenceStarts = [];      // per chunk: char offsets where sentences begin
     let chunkEls = [];            // rendered chunk elements in the reading view
     let currentUrl = "";          // article URL for resume tracking ("" = pasted text)
     let articleTitle = "Article"; // for the lock-screen / media metadata
@@ -611,6 +625,85 @@
       return voices[Number(voiceSelect.value)] || null;
     }
 
+    // --- Sentence-level navigation ------------------------------------------
+
+    // Record where each sentence begins inside each chunk (same sentence
+    // regex as splitText, so boundaries agree).
+    function computeSentenceStarts() {
+      sentenceStarts = chunks.map(text => {
+        const re = /[^.!?]+[.!?]+|[^.!?]+$/g;
+        const starts = [];
+        let m;
+        while ((m = re.exec(text))) {
+          const lead = m[0].match(/^\s*/)[0].length;  // skip leading whitespace
+          starts.push(m.index + lead);
+        }
+        return starts.length ? starts : [0];
+      });
+    }
+
+    // Best estimate of the spoken position (char offset) in the current chunk.
+    function currentCharPos() {
+      if (activeEngine() === "cloudflare") {
+        // TTS speed is roughly constant, so time maps linearly to characters.
+        const d = cfAudio.duration;
+        if (isFinite(d) && d > 0) {
+          return Math.floor((cfAudio.currentTime / d) * chunks[chunkIndex].length);
+        }
+        return chunkCharOffset;
+      }
+      return lastBoundaryAbs;
+    }
+
+    function sentenceIndexAt(chunkI, pos) {
+      const starts = sentenceStarts[chunkI] || [0];
+      let si = 0;
+      for (let i = 0; i < starts.length; i++) if (starts[i] <= pos) si = i;
+      return si;
+    }
+
+    function stepSentence(delta) {
+      if (playbackState === "idle" || !chunks.length) return;
+      const starts = sentenceStarts[chunkIndex] || [0];
+      const target = sentenceIndexAt(chunkIndex, currentCharPos()) + delta;
+      if (target < 0) {
+        // Cross back into the previous chunk's last sentence.
+        if (chunkIndex > 0) {
+          const prev = sentenceStarts[chunkIndex - 1] || [0];
+          playFrom(chunkIndex - 1, prev[prev.length - 1]);
+        } else {
+          playFrom(0, 0);
+        }
+      } else if (target >= starts.length) {
+        if (chunkIndex < chunks.length - 1) playFrom(chunkIndex + 1, 0);
+      } else {
+        playFrom(chunkIndex, starts[target]);
+      }
+    }
+
+    // Char offset of a click inside a chunk element, so a tap on any sentence
+    // in the reading view can start playback there. Works whether the chunk
+    // holds plain text or per-word spans (their text nodes concatenate to the
+    // full chunk text). Falls back to 0 (chunk start).
+    function charOffsetFromPoint(el, x, y) {
+      let node = null, offset = 0;
+      if (document.caretRangeFromPoint) {
+        const r = document.caretRangeFromPoint(x, y);
+        if (r) { node = r.startContainer; offset = r.startOffset; }
+      } else if (document.caretPositionFromPoint) {
+        const p = document.caretPositionFromPoint(x, y);
+        if (p) { node = p.offsetNode; offset = p.offset; }
+      }
+      if (!node || !el.contains(node)) return 0;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let total = 0;
+      while (walker.nextNode()) {
+        if (walker.currentNode === node) return total + offset;
+        total += walker.currentNode.textContent.length;
+      }
+      return 0;
+    }
+
     // Single play/pause toggle, driven by real playback state:
     //   idle    -> disabled, shows ▶
     //   playing -> enabled,  shows ⏸ (click to pause)
@@ -636,6 +729,8 @@
       prevButton.disabled = playbackState === "idle";
       nextButton.disabled = playbackState === "idle" || chunkIndex >= chunks.length - 1;
       restartButton.disabled = playbackState === "idle";
+      prevSentenceButton.disabled = playbackState === "idle";
+      nextSentenceButton.disabled = playbackState === "idle";
     }
 
     // Render the article into the reading view, one clickable block per chunk.
@@ -645,7 +740,12 @@
         const el = document.createElement("span");
         el.className = "chunk";
         el.textContent = text;
-        el.addEventListener("click", () => playFrom(i));
+        el.addEventListener("click", (e) => {
+          // Start from the tapped sentence, not just the chunk.
+          const pos = charOffsetFromPoint(el, e.clientX, e.clientY);
+          const starts = sentenceStarts[i] || [0];
+          playFrom(i, starts[sentenceIndexAt(i, pos)]);
+        });
         readerEl.appendChild(el);
         return el;
       });
@@ -733,14 +833,17 @@
         return;
       }
 
-      const utterance = new SpeechSynthesisUtterance(chunks[chunkIndex]);
+      // Speak from the sentence offset (0 = whole chunk). Highlighting maps
+      // the utterance's relative charIndex back to absolute chunk positions.
+      const startOffset = chunkCharOffset;
+      const utterance = new SpeechSynthesisUtterance(chunks[chunkIndex].slice(startOffset));
       utterance.voice = selectedVoice();
       utterance.rate = Number(rateInput.value);
       utterance.pitch = 1;
       utterance.volume = 1;
 
       // Keep the controls in sync with what the speech engine actually does.
-      utterance.onstart = () => { setControls("playing"); updateNav(); };
+      utterance.onstart = () => { lastBoundaryAbs = startOffset; setControls("playing"); updateNav(); };
       utterance.onpause = () => setControls("paused");
       utterance.onresume = () => setControls("playing");
 
@@ -749,13 +852,15 @@
       utterance.onboundary = (event) => {
         if (utterance !== currentUtterance) return;
         if (event.name && event.name !== "word") return;
-        highlightWordAt(event.charIndex);
+        lastBoundaryAbs = startOffset + event.charIndex;
+        highlightWordAt(startOffset + event.charIndex);
       };
 
       utterance.onend = () => {
         // Ignore the end event of an utterance we've already replaced (e.g. via
         // prev/next or a re-read) so navigation can't double-advance the index.
         if (utterance !== currentUtterance) return;
+        chunkCharOffset = 0;
         chunkIndex += 1;
         speakChunks();
       };
@@ -841,6 +946,7 @@
 
         cfAudio.onended = () => {
           if (token !== cfPlayToken) return;
+          chunkCharOffset = 0;
           chunkIndex += 1;
           playCloudflareChunk();
         };
@@ -851,6 +957,10 @@
 
         await cfAudio.play();
         if (token !== cfPlayToken) return;
+        // Sentence offsets map to time proportionally (TTS pace is steady).
+        if (chunkCharOffset > 0 && isFinite(cfAudio.duration) && cfAudio.duration > 0) {
+          cfAudio.currentTime = (chunkCharOffset / chunks[chunkIndex].length) * cfAudio.duration;
+        }
         setControls("playing");
         setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
         prefetchNext();  // warm the next chunk to avoid an audible gap
@@ -934,10 +1044,12 @@
       playFrom(target);
     }
 
-    // Jump to a chunk and play from there (used by prev/next and re-reads).
-    function playFrom(index) {
+    // Jump to a chunk (optionally a sentence offset within it) and play from
+    // there (used by prev/next, sentence steps, seeks, and re-reads).
+    function playFrom(index, charOffset = 0) {
       if (!chunks.length) return;
       chunkIndex = Math.max(0, Math.min(index, chunks.length - 1));
+      chunkCharOffset = Math.max(0, Math.min(charOffset, chunks[chunkIndex].length - 1));
       stopAll();
       setControls("playing");
       if (activeEngine() === "cloudflare") {
@@ -959,7 +1071,9 @@
       const engine = activeEngine();
       stopAll();
       chunks = splitText(cleaned, engine === "cloudflare" ? CF_CHUNK : BROWSER_CHUNK);
+      computeSentenceStarts();
       chunkIndex = Math.max(0, Math.min(startIndex, chunks.length - 1));
+      chunkCharOffset = 0;
       renderChunks();
       // Optimistically enable controls; the engine confirms "playing".
       setControls("playing");
@@ -1034,11 +1148,12 @@
     });
 
     // speechSynthesis can't change rate mid-utterance, so on release re-speak
-    // the current chunk at the new speed (only while actively playing).
+    // from the current sentence at the new speed (only while actively playing).
     rateInput.addEventListener("change", () => {
       savePrefs();
       if (playbackState === "playing" && activeEngine() === "browser") {
-        playFrom(chunkIndex);
+        const starts = sentenceStarts[chunkIndex] || [0];
+        playFrom(chunkIndex, starts[sentenceIndexAt(chunkIndex, currentCharPos())]);
       }
     });
 
@@ -1083,6 +1198,16 @@
     restartButton.addEventListener("click", () => playFrom(0));
     prevButton.addEventListener("click", handlePrev);
     nextButton.addEventListener("click", () => playFrom(chunkIndex + 1));
+    prevSentenceButton.addEventListener("click", () => stepSentence(-1));
+    nextSentenceButton.addEventListener("click", () => stepSentence(1));
+
+    // Tap the progress bar to jump anywhere in the article.
+    progressEl.addEventListener("click", (e) => {
+      if (!chunks.length || playbackState === "idle") return;
+      const rect = progressEl.getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / rect.width;
+      playFrom(Math.floor(pct * chunks.length));
+    });
 
     // Keyboard shortcuts: Space/K play-pause, arrows skip. Ignored while typing.
     document.addEventListener("keydown", (e) => {
@@ -1100,6 +1225,12 @@
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         if (!nextButton.disabled) playFrom(chunkIndex + 1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        stepSentence(-1);
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        stepSentence(1);
       }
     });
 

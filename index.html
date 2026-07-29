@@ -91,6 +91,17 @@
       background: linear-gradient(90deg, var(--accent), var(--accent-2));
       color: #fff; border: none;
     }
+    /* Speed slider flanked by -/+ nudge buttons, for one-step (0.05) changes
+       that are far easier to hit than dragging the thumb on a phone. */
+    .speed { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; }
+    button.nudge {
+      width: 40px; margin: 0; padding: 7px 0;
+      font-size: 19px; line-height: 1;
+      background: color-mix(in srgb, var(--accent) 14%, Canvas);
+      color: CanvasText;
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    button.nudge:not(:disabled):hover { background: color-mix(in srgb, var(--accent) 24%, Canvas); }
     .premium, details.manual {
       margin-top: 16px;
       border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
@@ -221,14 +232,18 @@
       </div>
       <div>
         <label for="rate">Speed: <span id="rateValue">1.0</span>x</label>
-        <input id="rate" type="range" min="0.7" max="1.3" step="0.05" value="1" />
+        <div class="speed">
+          <button type="button" id="rateDown" class="nudge" aria-label="Slower by 0.05" title="Slower (-0.05)">&minus;</button>
+          <input id="rate" type="range" min="0.7" max="1.3" step="0.05" value="1" />
+          <button type="button" id="rateUp" class="nudge" aria-label="Faster by 0.05" title="Faster (+0.05)">+</button>
+        </div>
       </div>
     </div>
 
     <details class="premium" id="premiumSection">
       <summary>Premium voices</summary>
       <label class="check">
-        <input type="checkbox" id="cfEnable" /> Use premium voice
+        <input type="checkbox" id="cfEnable" checked /> Use premium voice
       </label>
       <div class="row">
         <div>
@@ -236,7 +251,7 @@
           <select id="cfModel">
             <option value="melotts">MeloTTS — English (high volume)</option>
             <option value="aura-1">Aura-1 — natural voices</option>
-            <option value="aura-2">Aura-2 — best quality</option>
+            <option value="aura-2" selected>Aura-2 — best quality</option>
           </select>
         </div>
         <div>
@@ -280,6 +295,8 @@
     const voiceSelect = document.getElementById("voice");
     const rateInput = document.getElementById("rate");
     const rateValue = document.getElementById("rateValue");
+    const rateDown = document.getElementById("rateDown");
+    const rateUp = document.getElementById("rateUp");
     const textArea = document.getElementById("text");
     const statusEl = document.getElementById("status");
     const readerEl = document.getElementById("reader");
@@ -298,12 +315,17 @@
     const cfModel = document.getElementById("cfModel");
     const cfVoice = document.getElementById("cfVoice");
     const cfKey = document.getElementById("cfKey");
+    const premiumSection = document.getElementById("premiumSection");
 
     // Set this to your deployed Worker URL (see worker/README.md). Not secret —
     // the access key protects it.
     const CF_WORKER_URL = "https://article-reader-tts.article-reader.workers.dev";
     const CF_KEY_STORAGE = "cf_access_key";
     const PREFS_STORAGE = "ar_prefs";        // saved voice/speed/model choices
+    // Bumped when stored premium prefs can't be trusted. v1 builds persisted
+    // quota-fallback degradations, so an old entry may pin a weaker tier (or
+    // the free voice) forever; v1 premium fields are dropped on read.
+    const PREFS_VERSION = 2;
     const POS_STORAGE = "ar_positions";      // per-URL resume positions
     const POS_TTL_MS = 7 * 24 * 60 * 60 * 1000;  // forget resume points after 7 days
     const AUDIO_CACHE_MAX = 40;              // in-memory premium-audio cache cap
@@ -323,12 +345,37 @@
     const PAUSE_ICON = "⏸";  // ⏸
     let playbackState = "idle";   // "idle" | "playing" | "paused"
     let currentUtterance = null;  // browser engine guard
-    // One persistent element for all premium audio, unlocked by the user's
-    // first tap. Reusing it (instead of new Audio() per chunk) is what lets
-    // background .play() calls succeed on Android once the screen is off.
-    const cfAudio = new Audio();
-    let currentObjectUrl = null;  // cloudflare engine blob URL (to revoke)
-    let cfPlayToken = 0;          // cloudflare async guard (discard stale fetches)
+    // Two persistent elements for premium audio, alternating per chunk. Each is
+    // created once and only ever re-`src`ed (never replaced with new Audio()),
+    // so the user-activation from the first tap carries over to every later
+    // chunk. Double-buffering is what keeps playback alive with the screen off:
+    // the next chunk is fetched and loaded into the idle element *while* the
+    // current one plays, so the handoff in `onended` is a synchronous play() on
+    // an already-buffered element — no fetch, no load, nothing awaited in the
+    // gap where the platform would otherwise suspend us.
+    const cfPlayers = [createCfPlayer(), createCfPlayer()];
+    let cfActive = 0;                 // index of the element currently playing
+    const cfObjectUrls = [null, null];  // blob URL held by each element (to revoke)
+    let cfPrepared = -1;              // chunk index preloaded into the idle element
+    let cfPlayToken = 0;              // cloudflare async guard (discard stale fetches)
+
+    function createCfPlayer() {
+      const el = new Audio();
+      el.preload = "auto";
+      el.playsInline = true;
+      // In the document (rather than detached) so the engine treats it as a
+      // real media element for audio focus and background playback.
+      document.body.appendChild(el);
+      return el;
+    }
+
+    function cfAudio() { return cfPlayers[cfActive]; }
+
+    // Declares long-form playback: on iOS this keeps audio running with the
+    // screen off and ignores the ringer switch. Ignored where unsupported.
+    try {
+      if ("audioSession" in navigator) navigator.audioSession.type = "playback";
+    } catch {}
 
     let voices = [];
     let chunks = [];
@@ -371,13 +418,35 @@
       catch { return {}; }
     }
 
+    // The premium tier the user *chose*, kept separate from what is currently
+    // active: quotaFallback() degrades the live model (or drops to the free
+    // voice) mid-article, and that must neither be persisted nor carried into
+    // the next article. restorePreferredCf() puts the choice back.
+    let preferredCf = null;
+
+    function snapshotCfPrefs() {
+      preferredCf = { enable: cfEnable.checked, model: cfModel.value, voice: cfVoice.value };
+    }
+
+    function restorePreferredCf() {
+      if (!preferredCf) return;
+      cfEnable.checked = preferredCf.enable;
+      cfModel.value = preferredCf.model;
+      syncCfModelUi();  // repopulates the voice list for the restored model
+      if (preferredCf.voice) cfVoice.value = preferredCf.voice;
+    }
+
     function savePrefs() {
+      // Persist the chosen tier, never a degraded one (see preferredCf).
+      const cf = preferredCf ||
+        { enable: cfEnable.checked, model: cfModel.value, voice: cfVoice.value };
       localStorage.setItem(PREFS_STORAGE, JSON.stringify({
+        v: PREFS_VERSION,
         voice: voiceSelect.selectedOptions[0]?.textContent || "",
         rate: rateInput.value,
-        cfEnable: cfEnable.checked,
-        cfModel: cfModel.value,
-        cfVoice: cfVoice.value,
+        cfEnable: cf.enable,
+        cfModel: cf.model,
+        cfVoice: cf.voice,
       }));
     }
 
@@ -472,15 +541,6 @@
       while (audioCache.size > AUDIO_CACHE_MAX) {
         audioCache.delete(audioCache.keys().next().value);
       }
-    }
-
-    // Warm the cache for the next chunk while the current one plays.
-    function prefetchNext() {
-      const next = chunkIndex + 1;
-      if (next >= chunks.length) return;
-      const key = `${cfModel.value}|${cfVoice.value}|${chunks[next]}`;
-      if (audioCache.has(key)) return;
-      fetchCfAudio(chunks[next]).catch(() => {});  // best effort; ignore errors
     }
 
     function loadVoices() {
@@ -656,9 +716,10 @@
     function currentCharPos() {
       if (activeEngine() === "cloudflare") {
         // TTS speed is roughly constant, so time maps linearly to characters.
-        const d = cfAudio.duration;
+        const el = cfAudio();
+        const d = el.duration;
         if (isFinite(d) && d > 0) {
-          return Math.floor((cfAudio.currentTime / d) * chunks[chunkIndex].length);
+          return Math.floor((el.currentTime / d) * chunks[chunkIndex].length);
         }
         return chunkCharOffset;
       }
@@ -1008,10 +1069,12 @@
 
     function handleCfError(error) {
       if (error.code === "no-key") {
-        setStatus("Enter your premium access key.");
+        setStatus("Enter your premium access key, or untick “Use premium voice”.");
+        premiumSection.open = true;  // the key field is inside a collapsed <details>
         cfKey.focus();
       } else if (error.code === "unauthorized") {
         setStatus("Access key rejected — check your key.");
+        premiumSection.open = true;
       } else if (error.code === "quota") {
         setStatus("Premium voice failed: daily Workers AI quota reached. It resets at midnight UTC — until then, use a built-in voice.");
       } else if (error.code === "network") {
@@ -1025,7 +1088,9 @@
 
     // When Workers AI quota/capacity runs out mid-article, degrade through
     // the premium tiers (Aura-2 -> Aura-1 -> MeloTTS) and finally to the
-    // free browser voice, keeping the listening position. The short delay
+    // free browser voice, keeping the listening position. The degraded tier is
+    // deliberately not saved (see preferredCf): the daily quota resets, so the
+    // next article starts over at the most capable voice. The short delay
     // lets the user read the status message; the token guard drops the
     // retry if they navigate or stop in the meantime.
     function quotaFallback() {
@@ -1036,12 +1101,10 @@
         setStatus(`Premium quota reached for this voice — switching to ${next === "aura-1" ? "Aura-1" : "MeloTTS"}...`);
         cfModel.value = next;
         syncCfModelUi();
-        savePrefs();
         retry(playCloudflareChunk);
       } else {
         setStatus("Premium quota reached — switching to the free browser voice...");
         cfEnable.checked = false;
-        savePrefs();
         // Re-chunk for the browser engine, mapping the position by characters
         // (robust even if the engines' chunk sizes ever diverge again).
         const consumed = chunks.slice(0, chunkIndex).reduce((n, c) => n + c.length + 1, 0) + chunkCharOffset;
@@ -1063,32 +1126,19 @@
       try {
         const blob = await fetchCfAudio(chunks[chunkIndex]);
         if (token !== cfPlayToken) return;  // superseded by a skip/stop/re-read
-        if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-        const url = URL.createObjectURL(blob);
-        currentObjectUrl = url;
-        cfAudio.src = url;  // loading resets playbackRate, so set it after
-        cfAudio.playbackRate = Number(rateInput.value);
+        cfPrepared = -1;  // any preloaded chunk is no longer the one after this
+        const el = setCfSource(cfActive, blob);
+        wireCfHandlers(el, token);
 
-        cfAudio.onended = () => {
-          if (token !== cfPlayToken) return;
-          chunkCharOffset = 0;
-          chunkIndex += 1;
-          playCloudflareChunk();
-        };
-        cfAudio.onerror = () => {
-          if (token !== cfPlayToken) return;
-          handleCfError(new Error("server"));
-        };
-
-        await cfAudio.play();
+        await el.play();
         if (token !== cfPlayToken) return;
         // Sentence offsets map to time proportionally (TTS pace is steady).
-        if (chunkCharOffset > 0 && isFinite(cfAudio.duration) && cfAudio.duration > 0) {
-          cfAudio.currentTime = (chunkCharOffset / chunks[chunkIndex].length) * cfAudio.duration;
+        if (chunkCharOffset > 0 && isFinite(el.duration) && el.duration > 0) {
+          el.currentTime = (chunkCharOffset / chunks[chunkIndex].length) * el.duration;
         }
         setControls("playing");
         setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
-        prefetchNext();  // warm the next chunk to avoid an audible gap
+        prepareNextCfChunk(token);  // load the next chunk before this one ends
       } catch (error) {
         if (token !== cfPlayToken) return;
         // Autoplay blocked (shared-in article, no user gesture yet): the src
@@ -1104,6 +1154,88 @@
         }
         handleCfError(error);
       }
+    }
+
+    // Point one of the two elements at a chunk's audio, taking ownership of the
+    // blob URL it replaces. Setting src resets playbackRate, so re-apply it.
+    function setCfSource(slot, blob) {
+      const el = cfPlayers[slot];
+      if (cfObjectUrls[slot]) URL.revokeObjectURL(cfObjectUrls[slot]);
+      cfObjectUrls[slot] = URL.createObjectURL(blob);
+      el.src = cfObjectUrls[slot];
+      el.playbackRate = Number(rateInput.value);
+      el.load();  // start buffering now, not at play() time
+      return el;
+    }
+
+    function wireCfHandlers(el, token) {
+      el.onended = () => {
+        if (token !== cfPlayToken) return;
+        advanceCfChunk();
+      };
+      el.onerror = () => {
+        if (token !== cfPlayToken) return;
+        handleCfError(new Error("server"));
+      };
+    }
+
+    // Fetch and buffer the chunk *after* the current one into the idle element
+    // while the current one is still playing. Best effort: on failure the
+    // handoff just falls back to the fetch-then-play path.
+    async function prepareNextCfChunk(token) {
+      const next = chunkIndex + 1;
+      if (next >= chunks.length) return;
+      try {
+        const blob = await fetchCfAudio(chunks[next]);
+        // Bail if playback moved on (skip, stop, or the chunk already advanced).
+        if (token !== cfPlayToken || chunkIndex + 1 !== next) return;
+        const el = setCfSource(1 - cfActive, blob);
+        el.onended = null;
+        // A load failure only invalidates the preload, it isn't a play error.
+        el.onerror = () => { if (cfPrepared === next) cfPrepared = -1; };
+        cfPrepared = next;
+      } catch {
+        cfPrepared = -1;
+      }
+    }
+
+    // Chunk handoff, driven by `ended` — which still fires with the screen off.
+    // Nothing may be awaited before play(): the platform can suspend the page
+    // in a silent gap, which is exactly what used to stop playback mid-article.
+    // So when the next chunk is already buffered we swap elements and start it
+    // synchronously, and only then queue the following one.
+    function advanceCfChunk() {
+      const token = cfPlayToken;
+      chunkCharOffset = 0;
+      chunkIndex += 1;
+      if (chunkIndex >= chunks.length) {
+        setStatus("Finished reading.");
+        setControls("idle");
+        clearPosition();
+        return;
+      }
+      if (cfPrepared !== chunkIndex) {
+        playCloudflareChunk();  // not preloaded (slow network): fetch it now
+        return;
+      }
+      // The outgoing element is done with; unwire it so a late ended/error
+      // event on it can't advance the chunk a second time.
+      const finished = cfAudio();
+      finished.onended = null;
+      finished.onerror = null;
+      cfActive = 1 - cfActive;
+      cfPrepared = -1;
+      const el = cfAudio();
+      wireCfHandlers(el, token);
+      el.playbackRate = Number(rateInput.value);
+      highlightChunk(chunkIndex);
+      buildSentenceSpans(chunkIndex);
+      setControls("playing");
+      setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
+      el.play().then(() => prepareNextCfChunk(token)).catch(() => {
+        if (token !== cfPlayToken) return;
+        playCloudflareChunk();  // refused (rare in background): retry the long way
+      });
     }
 
     // --- Screen wake lock (browser engine only) ----------------------------
@@ -1134,21 +1266,32 @@
       }
     }
 
-    // The platform releases wake locks when the tab is hidden; re-acquire
-    // when the user comes back if we're still playing.
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") syncWakeLock();
+      if (document.visibilityState !== "visible") return;
+      // The platform releases wake locks when the tab is hidden; re-acquire.
+      syncWakeLock();
+      // If something outside our control (low memory, an interrupting call)
+      // paused premium audio while we were backgrounded, pick it back up.
+      const el = cfAudio();
+      if (playbackState === "playing" && activeEngine() === "cloudflare" &&
+          el.paused && el.currentSrc) {
+        el.play().catch(() => {});
+      }
     });
 
     // Highlight the sentence currently being spoken by the premium engine,
     // estimated from playback time (fires ~4x/sec — plenty for sentences).
-    cfAudio.addEventListener("timeupdate", () => {
-      if (sentenceSpanIndex !== chunkIndex || !currentSentenceSpans.length) return;
-      const d = cfAudio.duration;
-      if (!isFinite(d) || d <= 0) return;
-      const pos = (cfAudio.currentTime / d) * chunks[chunkIndex].length;
-      const si = sentenceIndexAt(chunkIndex, pos);
-      currentSentenceSpans.forEach((s, j) => s.el.classList.toggle("sentence-active", j === si));
+    // Both elements report it; only the one currently playing matters.
+    cfPlayers.forEach((player) => {
+      player.addEventListener("timeupdate", () => {
+        if (player !== cfAudio()) return;
+        if (sentenceSpanIndex !== chunkIndex || !currentSentenceSpans.length) return;
+        const d = player.duration;
+        if (!isFinite(d) || d <= 0) return;
+        const pos = (player.currentTime / d) * chunks[chunkIndex].length;
+        const si = sentenceIndexAt(chunkIndex, pos);
+        currentSentenceSpans.forEach((s, j) => s.el.classList.toggle("sentence-active", j === si));
+      });
     });
 
     // --- Shared playback ---------------------------------------------------
@@ -1159,17 +1302,21 @@
       clearInterval(speechTickTimer);
       speechSynthesis.cancel();
       currentUtterance = null;
-      // Reset (don't discard) the persistent premium element so it keeps its
-      // user-activation and can be replayed from the background.
-      cfAudio.pause();
-      cfAudio.onended = null;
-      cfAudio.onerror = null;
-      cfAudio.removeAttribute("src");
-      cfAudio.load();  // abort + release the current resource
-      if (currentObjectUrl) {
-        URL.revokeObjectURL(currentObjectUrl);
-        currentObjectUrl = null;
-      }
+      // Reset (don't discard) the persistent premium elements so they keep
+      // their user-activation and can be replayed from the background. This
+      // also drops the preloaded next chunk, which is no longer next.
+      cfPrepared = -1;
+      cfPlayers.forEach((el, i) => {
+        el.pause();
+        el.onended = null;
+        el.onerror = null;
+        el.removeAttribute("src");
+        el.load();  // abort + release the current resource
+        if (cfObjectUrls[i]) {
+          URL.revokeObjectURL(cfObjectUrls[i]);
+          cfObjectUrls[i] = null;
+        }
+      });
       clearWordSpans();
     }
 
@@ -1245,6 +1392,10 @@
         return;
       }
 
+      // Every new article starts at the user's chosen premium tier — normally
+      // Aura-2 — even if the previous one was degraded by a quota fallback.
+      restorePreferredCf();
+
       loadButton.disabled = true;
       setStatus("Extracting article text...");
 
@@ -1299,21 +1450,43 @@
       }
     }
 
-    rateInput.addEventListener("input", () => {
-      rateValue.textContent = Number(rateInput.value).toFixed(2);
-      // Premium audio supports live speed changes; apply instantly.
-      cfAudio.playbackRate = Number(rateInput.value);
-    });
+    // Live feedback while dragging: label, and premium audio (which supports
+    // live speed changes, unlike speechSynthesis).
+    function applyRate() {
+      const rate = Number(rateInput.value);
+      rateValue.textContent = rate.toFixed(2);
+      cfPlayers.forEach((el) => { el.playbackRate = rate; });
+      rateDown.disabled = rate <= Number(rateInput.min);
+      rateUp.disabled = rate >= Number(rateInput.max);
+    }
 
-    // speechSynthesis can't change rate mid-utterance, so on release re-speak
-    // from the current sentence at the new speed (only while actively playing).
-    rateInput.addEventListener("change", () => {
+    // speechSynthesis can't change rate mid-utterance, so once the new speed is
+    // settled, re-speak from the current sentence (only while actively playing).
+    function commitRate() {
       savePrefs();
       if (playbackState === "playing" && activeEngine() === "browser") {
         const starts = sentenceStarts[chunkIndex] || [0];
         playFrom(chunkIndex, starts[sentenceIndexAt(chunkIndex, currentCharPos())]);
       }
-    });
+    }
+
+    rateInput.addEventListener("input", applyRate);
+    rateInput.addEventListener("change", commitRate);
+
+    // The -/+ buttons move by one slider step, which is much easier to hit
+    // precisely than the thumb — especially on a phone.
+    function nudgeRate(delta) {
+      const value = Number(rateInput.value);
+      const next = Math.min(Number(rateInput.max), Math.max(Number(rateInput.min), value + delta));
+      const rounded = Math.round(next * 100) / 100;  // keep 0.05 steps exact
+      if (rounded === value) return;
+      rateInput.value = rounded;
+      applyRate();
+      commitRate();
+    }
+
+    rateDown.addEventListener("click", () => nudgeRate(-0.05));
+    rateUp.addEventListener("click", () => nudgeRate(0.05));
 
     loadButton.addEventListener("click", loadArticle);
     readTextButton.addEventListener("click", () => {
@@ -1336,14 +1509,14 @@
     function togglePlayPause() {
       if (playbackState === "playing") {
         if (activeEngine() === "cloudflare") {
-          cfAudio.pause();
+          cfAudio().pause();
         } else {
           speechSynthesis.pause();
         }
         setControls("paused");
       } else if (playbackState === "paused") {
         if (activeEngine() === "cloudflare") {
-          cfAudio.play();
+          cfAudio().play().catch(() => {});
         } else if (speechSynthesis.paused) {
           speechSynthesis.resume();
         } else {
@@ -1444,9 +1617,11 @@
       populateAuraVoices();
     }
 
-    cfEnable.addEventListener("change", () => { savePrefs(); reReadIfLoaded(); });
-    cfModel.addEventListener("change", () => { syncCfModelUi(); savePrefs(); reReadIfLoaded(); });
-    cfVoice.addEventListener("change", () => { savePrefs(); reReadIfLoaded(); });
+    // Any manual change is a new *choice*, so it becomes the tier restored for
+    // later articles (unlike an automatic quota degradation).
+    cfEnable.addEventListener("change", () => { snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
+    cfModel.addEventListener("change", () => { syncCfModelUi(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
+    cfVoice.addEventListener("change", () => { snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     // Persist the access key locally; never leaves this browser except to the Worker.
     cfKey.addEventListener("change", () => {
       localStorage.setItem(CF_KEY_STORAGE, cfKey.value.trim());
@@ -1454,14 +1629,17 @@
 
     // Restore saved preferences (voice is restored later, in loadVoices).
     const savedPrefs = loadJson(PREFS_STORAGE);
-    if (savedPrefs.rate) {
-      rateInput.value = savedPrefs.rate;
-      rateValue.textContent = Number(savedPrefs.rate).toFixed(2);
-    }
-    if (typeof savedPrefs.cfEnable === "boolean") cfEnable.checked = savedPrefs.cfEnable;
-    if (savedPrefs.cfModel) cfModel.value = savedPrefs.cfModel;
+    if (savedPrefs.rate) rateInput.value = savedPrefs.rate;
+    applyRate();  // label + bounds for the -/+ buttons
+    // Premium prefs are only honoured from PREFS_VERSION onwards; older entries
+    // may have a quota degradation baked in, so fall back to the markup
+    // defaults (premium on, Aura-2 — the most capable tier).
+    const cfPrefsTrusted = savedPrefs.v === PREFS_VERSION;
+    if (cfPrefsTrusted && typeof savedPrefs.cfEnable === "boolean") cfEnable.checked = savedPrefs.cfEnable;
+    if (cfPrefsTrusted && savedPrefs.cfModel) cfModel.value = savedPrefs.cfModel;
     syncCfModelUi();  // sets the disabled state and populates voices for the model
-    if (savedPrefs.cfVoice) cfVoice.value = savedPrefs.cfVoice;  // restore after populate
+    if (cfPrefsTrusted && savedPrefs.cfVoice) cfVoice.value = savedPrefs.cfVoice;  // after populate
+    snapshotCfPrefs();  // this is the tier every new article returns to
 
     cfKey.value = localStorage.getItem(CF_KEY_STORAGE) || "";
 

@@ -322,10 +322,11 @@
     const CF_WORKER_URL = "https://article-reader-tts.article-reader.workers.dev";
     const CF_KEY_STORAGE = "cf_access_key";
     const PREFS_STORAGE = "ar_prefs";        // saved voice/speed/model choices
-    // Bumped when stored premium prefs can't be trusted. v1 builds persisted
-    // quota-fallback degradations, so an old entry may pin a weaker tier (or
-    // the free voice) forever; v1 premium fields are dropped on read.
-    const PREFS_VERSION = 2;
+    // Bumped when stored premium prefs can't be trusted, in which case the
+    // markup defaults win: v1 persisted quota-fallback degradations (pinning a
+    // weaker tier, or the free voice, forever), and v2 stored the then-default
+    // voice explicitly, which would override the new Random default.
+    const PREFS_VERSION = 3;
     const POS_STORAGE = "ar_positions";      // per-URL resume positions
     const POS_TTL_MS = 7 * 24 * 60 * 60 * 1000;  // forget resume points after 7 days
     const AUDIO_CACHE_MAX = 40;              // in-memory premium-audio cache cap
@@ -338,6 +339,11 @@
       "luna", "asteria", "aurora", "hera",   // female
       "apollo", "orion", "orpheus", "zeus",  // male
     ];
+    // The premium voice select's default entry: a real voice is drawn from the
+    // active model's list per reading (see resolveCfVoice), so the Worker never
+    // sees this sentinel — activeCfVoice is what gets sent.
+    const RANDOM_VOICE = "random";
+    let activeCfVoice = "";
     const CHUNK_SIZE = 400;      // both engines; also bounds premium first-audio latency
     const CHARS_PER_SEC = 15;    // rough TTS reading speed at rate 1.0, for ETA
 
@@ -434,6 +440,7 @@
       cfModel.value = preferredCf.model;
       syncCfModelUi();  // repopulates the voice list for the restored model
       if (preferredCf.voice) cfVoice.value = preferredCf.voice;
+      resolveCfVoice();  // after the select is back to the chosen value
     }
 
     function savePrefs() {
@@ -532,7 +539,7 @@
     // --- Premium audio cache (in-memory, this page session only) -----------
 
     function cfCacheKey(text) {
-      return `${cfModel.value}|${cfVoice.value}|${text}`;
+      return `${cfModel.value}|${activeCfVoice}|${text}`;
     }
 
     function cacheAudio(key, blob) {
@@ -1041,7 +1048,7 @@
           headers: { "Content-Type": "application/json", "X-Access-Key": key },
           body: JSON.stringify({
             model: cfModel.value,
-            voice: cfVoice.value,
+            voice: activeCfVoice,
             text,
             lang: "en",
           }),
@@ -1357,6 +1364,8 @@
         return;
       }
       const engine = activeEngine();
+      // Draw the narrator for this reading (a no-op unless "Random" is chosen).
+      if (engine === "cloudflare") resolveCfVoice();
       stopAll();
       chunks = splitText(cleaned, CHUNK_SIZE);
       computeSentenceStarts();
@@ -1599,29 +1608,61 @@
 
     // --- Premium (Cloudflare) controls ------------------------------------
 
+    function auraVoiceList() {
+      return cfModel.value === "aura-2" ? AURA2_VOICES : AURA_VOICES;
+    }
+
+    function voiceLabel(name) {
+      return name.charAt(0).toUpperCase() + name.slice(1);
+    }
+
     function populateAuraVoices() {
-      const list = cfModel.value === "aura-2" ? AURA2_VOICES : AURA_VOICES;
       cfVoice.innerHTML = "";
-      list.forEach((name, i) => {
+      // The default: a different narrator per article, rather than always the
+      // same one. Still overridable by picking a specific voice below it.
+      const random = document.createElement("option");
+      random.value = RANDOM_VOICE;
+      random.textContent = "Random";
+      random.selected = true;
+      cfVoice.appendChild(random);
+      auraVoiceList().forEach((name) => {
         const o = document.createElement("option");
         o.value = name;
-        o.textContent = name.charAt(0).toUpperCase() + name.slice(1);
-        if (i === 0) o.selected = true;
+        o.textContent = voiceLabel(name);
         cfVoice.appendChild(o);
       });
+    }
+
+    // Turn the "Random" choice into a concrete voice. Resolved once per reading
+    // (and per model change, since the two Aura models offer different voices)
+    // rather than per chunk, so one article is read by one narrator throughout.
+    function resolveCfVoice() {
+      const list = auraVoiceList();
+      activeCfVoice = cfVoice.value === RANDOM_VOICE
+        ? list[Math.floor(Math.random() * list.length)]
+        : cfVoice.value;
+      // Name the pick in the option itself, so the voice being used is visible.
+      const option = cfVoice.querySelector(`option[value="${RANDOM_VOICE}"]`);
+      if (option) {
+        option.textContent = cfVoice.value === RANDOM_VOICE
+          ? `Random (${voiceLabel(activeCfVoice)})`
+          : "Random";
+      }
+      return activeCfVoice;
     }
 
     function syncCfModelUi() {
       // Aura models have selectable voices; MeloTTS does not.
       cfVoice.disabled = cfModel.value === "melotts";
       populateAuraVoices();
+      resolveCfVoice();
     }
 
     // Any manual change is a new *choice*, so it becomes the tier restored for
     // later articles (unlike an automatic quota degradation).
     cfEnable.addEventListener("change", () => { snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     cfModel.addEventListener("change", () => { syncCfModelUi(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
-    cfVoice.addEventListener("change", () => { snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
+    cfVoice.addEventListener("change", () => { resolveCfVoice(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     // Persist the access key locally; never leaves this browser except to the Worker.
     cfKey.addEventListener("change", () => {
       localStorage.setItem(CF_KEY_STORAGE, cfKey.value.trim());

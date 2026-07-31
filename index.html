@@ -115,6 +115,11 @@
       font-weight: 650; margin: 12px 0 4px;
     }
     .premium .check input { width: auto; }
+    .check.standalone {
+      display: flex; align-items: center; gap: 8px;
+      margin: 14px 0 0; font-size: 14px; cursor: pointer;
+    }
+    .check.standalone input { width: auto; }
     .premium input[type="password"] { margin-top: 6px; }
     /* Progress bar across the whole article. Tappable to seek: the visible
        track is 6px; vertical padding widens the touch target invisibly. */
@@ -185,6 +190,18 @@
       transition: background .2s ease, opacity .2s ease;
     }
     .chunk:hover { opacity: 0.85; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    /* Section titles get their own chunk (see chunkArticle) so they can read as
+       headings instead of more body text. */
+    .chunk.heading {
+      font-size: 1.15em;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      opacity: 0.75;
+      margin: 18px 0 2px;
+      padding-bottom: 4px;
+    }
+    .chunk.heading:first-child { margin-top: 6px; }
+    .chunk.heading.active { opacity: 1; }
     .chunk.active {
       opacity: 1;
       background: var(--accent-soft);
@@ -240,7 +257,7 @@
       </div>
     </div>
 
-    <details class="premium" id="premiumSection">
+    <details class="premium" id="premiumSection" open>
       <summary>Premium voices</summary>
       <label class="check">
         <input type="checkbox" id="cfEnable" checked /> Use premium voice
@@ -262,6 +279,10 @@
       <label for="cfKey">Access key</label>
       <input id="cfKey" type="password" placeholder="Your access key" autocomplete="off" />
     </details>
+
+    <label class="check standalone" title="Drop dates, bylines, share links, related-article lists and similar page furniture">
+      <input type="checkbox" id="trimExtras" checked /> Trim article extras
+    </label>
 
     <button class="primary" id="loadButton">Load and read</button>
 
@@ -298,6 +319,7 @@
     const rateDown = document.getElementById("rateDown");
     const rateUp = document.getElementById("rateUp");
     const textArea = document.getElementById("text");
+    const trimExtras = document.getElementById("trimExtras");
     const statusEl = document.getElementById("status");
     const readerEl = document.getElementById("reader");
     const progressEl = document.getElementById("progress");
@@ -385,6 +407,7 @@
 
     let voices = [];
     let chunks = [];
+    let chunkKinds = [];          // per chunk: "heading" | "body" (see chunkArticle)
     let chunkIndex = 0;
     // Sentence-level position within the current chunk. chunkCharOffset is
     // where playback of this chunk started (0 = chunk start); lastBoundaryAbs
@@ -394,6 +417,7 @@
     let sentenceStarts = [];      // per chunk: char offsets where sentences begin
     let chunkEls = [];            // rendered chunk elements in the reading view
     let currentUrl = "";          // article URL for resume tracking ("" = pasted text)
+    let rawArticle = "";          // last extraction, re-cleaned when trimming is toggled
     let articleTitle = "Article"; // for the lock-screen / media metadata
     const audioCache = new Map(); // key `${model}|${voice}|${text}` -> Blob (session only)
 
@@ -454,6 +478,7 @@
         cfEnable: cf.enable,
         cfModel: cf.model,
         cfVoice: cf.voice,
+        trim: trimExtras.checked,
       }));
     }
 
@@ -591,7 +616,7 @@
       }
     }
 
-    function cleanArticle(raw) {
+    function cleanArticle(raw, title = "") {
       // Defensive markdown/preamble stripping (text mode removes most of this,
       // but Jina sometimes still returns markdown or a Title: preamble).
       const stripped = raw
@@ -604,17 +629,170 @@
         .replace(/^#{1,6}\s+/gm, "")    // markdown heading markers (not "C#"/"#1")
         .replace(/\*\*|__/g, "");
       const normalized = expandForSpeech(normalizeForSpeech(stripped));
-      // Jina text mode puts each paragraph/heading on its own line. Append a
-      // period to lines lacking terminal punctuation (mostly headings and list
-      // items) so the voice pauses instead of running them into the next line.
-      return normalized
+      // Jina text mode puts each paragraph/heading on its own line. Keep those
+      // line breaks (chunkArticle uses them for structure) and append a period
+      // to prose lines lacking terminal punctuation (mostly list items) so the
+      // voice pauses instead of running them into the next line. Headings need
+      // no period: they become their own chunk, so a pause follows anyway.
+      let lines = normalized
         .split(/\r?\n/)
-        .map(l => l.trim())
-        .filter(Boolean)
-        .map(l => /[.!?…:;)\]"'’”]$/.test(l) ? l : l + ".")
-        .join(" ")
-        .replace(/\s+/g, " ")
+        .map(l => l.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      // Page furniture (dates, bylines, share links, related lists) — opt-out
+      // via the "Trim article extras" checkbox. Runs before the period pass so
+      // the patterns see the line exactly as the page wrote it.
+      if (trimExtras.checked) lines = stripBoilerplate(lines, title);
+      return lines
+        .map(l => isHeadingLine(l) || /[.!?…:;)\]"'’”]$/.test(l) ? l : l + ".")
+        .join("\n")
         .trim();
+    }
+
+    // --- Boilerplate trimming ------------------------------------------------
+    // Everything here matches WHOLE lines: Jina's text mode puts each block on
+    // its own line, so "Share" alone is a share button while "Share prices
+    // fell..." is prose. Deliberately no LLM call — the signal is a line's
+    // shape and position, which is cheap, offline, and debuggable. Patterns are
+    // scoped to a zone (head / tail / anywhere) so a date in the article body
+    // survives even though the dateline under the headline does not.
+
+    // Junk lines, dropped wherever they appear. Full-line matches only.
+    const JUNK_EXACT_RE = [
+      /^(?:advertisement|advertisements|sponsored(?: content)?|promoted(?: content)?)$/i,
+      /^listen(?: to this article)?$/i,
+      /^\d+\s*(?:min(?:ute)?s?|hours?)\s*(?:read|listen)$/i,
+      /^reading time\b.*$/i,
+      /^\d[\d,.]*\s*[km]?\s*(?:comments?|views?|shares?|likes?|reads?)$/i,
+      /^(?:getty images|reuters|associated press|ap photo|afp|shutterstock|unsplash|istock)\.?$/i,
+      /^we use cookies\b.*$/i,
+      /^(?:accept(?: all)?(?: cookies)?|reject all|manage (?:cookies|preferences)|cookie settings)$/i,
+      /^(?:\d+\s+)+(?:next|previous|»)?$/i,     // pagination strips: "1 2 3 Next"
+      /^@[\w.]+$/,                              // a bare social handle
+    ];
+
+    // Junk lines that start with an innocent word, so they're only trusted when
+    // the line is short and unpunctuated — i.e. a button label, not a sentence.
+    const JUNK_SHORT_RE = [
+      /^share\b/i, /^copy (?:link|the link)\b/i, /^gift (?:this )?article\b/i,
+      /^(?:save|print|email|text|tweet|post|pin) (?:this|article|story)?\b/i,
+      /^(?:follow|connect with) (?:us|me|the author)\b/i,
+      /^(?:sign up|subscribe|get (?:our )?newsletter|enter your email|join .* newsletter)\b/i,
+      /^(?:photos?|photographs?|images?|illustrations?|credits?|captions?)\s*[:—–-]/i,
+      /^(?:leave|post) a comment\b/i, /^sign in to comment\b/i,
+    ];
+
+    // Head-zone patterns: datelines, bylines and section kickers.
+    const MONTHS = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+    const HEAD_RE = [
+      /^(?:published|posted|updated|last updated|first published|revised)\b.*$/i,
+      new RegExp(`^(?:${MONTHS})\\s+\\d{1,2},?\\s*\\d{0,4}$`, "i"),
+      new RegExp(`^\\d{1,2}\\s+(?:${MONTHS})\\.?,?\\s*\\d{0,4}$`, "i"),
+      /^\d{4}-\d{2}-\d{2}\b.*$/,
+      /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,
+      /^\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?(?:\s+[A-Z]{2,4})?\b.*$/i,   // "3:14 PM EDT ..."
+      // "By Jane Doe and Sam Ray" — case-sensitive on the name so a sentence
+      // starting "by the time..." is not mistaken for a byline.
+      /^(?:By|BY|by)\s+[A-Z][\w.'’-]+(?:\s+(?:and\s+)?[A-Z][\w.'’-]+){0,4}$/,
+      /^(?:words|reported|written|photographs?|edited|illustrated)\s+by\b.*$/i,
+      /^(?:opinion|analysis|commentary|editorial|newsletter|exclusive|feature|interview|review|guest post|op-ed)$/i,
+    ];
+
+    // Tail-zone markers. From the first one onwards, nothing is article text.
+    const TAIL_CUT_RE = [
+      /^(?:related|related (?:articles|stories|reading|posts|content)|more (?:from|on|stories|like this)|read (?:more|next)|you (?:might|may) also like|recommended(?: for you)?|most (?:popular|read)|up next|see also|further reading)\b.*$/i,
+      /^(?:tags?|topics?|filed under|categor(?:y|ies)|keywords)\s*:?.*$/i,
+      /^(?:©|copyright)\b.*$/i,
+      /^all rights reserved\b.*$/i,
+      /^(?:terms of (?:service|use)|privacy policy|cookie policy|contact us|about us|advertise|newsletters?)$/i,
+      /^(?:comments?|discussion|join the conversation)$/i,
+      /^this (?:article|story|post) (?:was|first) (?:originally )?(?:published|appeared)\b.*$/i,
+      /^(?:support our journalism|become a member|already a subscriber)\b.*$/i,
+      // Author bio: "Jane Doe is a reporter covering X for Y."
+      /^[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+){1,3}\s+is\s+(?:an?|the)\s+.{0,80}$/,
+    ];
+
+    function isJunkLine(line) {
+      if (JUNK_EXACT_RE.some(re => re.test(line))) return true;
+      const buttonish = line.length <= 48 && !/[.!?]$/.test(line);
+      return buttonish && JUNK_SHORT_RE.some(re => re.test(line));
+    }
+
+    // How boilerplate-ish a head-zone line looks. Scored rather than matched
+    // outright so shape (short, title-cased, carries a year, no verb) can catch
+    // datelines and kickers the patterns above don't spell out.
+    function headScore(line, afterDropped) {
+      let score = 0;
+      if (HEAD_RE.some(re => re.test(line))) score += 3;
+      if (line.length < 60 && !/[.!?]$/.test(line)) score += 1;
+      if (/\b(?:19|20)\d{2}\b/.test(line) && line.length <= 40) score += 1;
+      if (line.length <= 40 && line === line.toUpperCase() && /[A-Z]/.test(line)) score += 1;
+      if (afterDropped) score += 1;                      // boilerplate arrives in clusters
+      if (/\b(?:said|says|is|are|was|were|has|have|will|would|can|could|the)\b/i.test(line)) score -= 2;
+      if (line.length > 120) score -= 3;
+      return score;
+    }
+
+    // Drop the pre-article furniture and cut the post-article furniture.
+    function stripBoilerplate(lines, title = "") {
+      const dropped = [];
+      // The head zone ends at the first real prose paragraph: long, and ending
+      // in a sentence. Everything before that is headline/dateline/byline land.
+      const firstProse = lines.findIndex(l => l.length > 180 && /[.!?…"'’”]$/.test(l));
+      const headEnd = Math.min(firstProse === -1 ? 6 : firstProse, 8);
+      const norm = (s) => s.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
+      const titleNorm = norm(title);
+
+      let kept = [];
+      let lastDropped = false;
+      lines.forEach((line, i) => {
+        const inHead = i < headEnd;
+        // The headline usually repeats the <title>; we already show it above.
+        const dupTitle = inHead && titleNorm && norm(line) === titleNorm;
+        const drop = isJunkLine(line) || dupTitle ||
+          (inHead && headScore(line, lastDropped) >= 3);
+        lastDropped = drop;
+        if (drop) dropped.push(line); else kept.push(line);
+      });
+
+      // Tail: cut from the first marker in the closing stretch of the article.
+      // The guard is character-based, not line-based — the cut only stands if
+      // most of the article's text is still above it, so a mid-article
+      // "Read more" link box can't take the second half with it.
+      const totalChars = kept.reduce((n, l) => n + l.length, 0);
+      let charsAbove = 0;
+      const tailStart = Math.max(1, kept.length - 15);
+      for (let i = 0; i < kept.length; i++) {
+        // A cut marker is a label or a link line, never a full paragraph — the
+        // length cap is what keeps prose like "Related work continues at..."
+        // from ending the article.
+        if (i >= tailStart && kept[i].length <= 120 &&
+            TAIL_CUT_RE.some(re => re.test(kept[i])) &&
+            charsAbove >= totalChars * 0.6) {
+          dropped.push(...kept.slice(i));
+          kept = kept.slice(0, i);
+          break;
+        }
+        charsAbove += kept[i].length;
+      }
+
+      // Auditable: every drop is visible in the console, so a bad pattern can be
+      // spotted without guessing.
+      if (dropped.length) console.debug("[article-reader] trimmed extras:", dropped);
+      return kept;
+    }
+
+    // A line that reads like a section title rather than prose. Jina's text
+    // mode drops the markdown "#", so shape is all we have: short, few words,
+    // not a list item or blockquote, and no terminal punctuation — except "?"
+    // and "!", which standalone lines this short are almost always titles
+    // ("What About Costs?"). A period is excluded: too many one-line
+    // paragraphs would be mistaken for headings.
+    function isHeadingLine(line) {
+      const l = line.trim();
+      if (!l || l.length > 90) return false;
+      if (/[.…,;:)\]"'’”]$/.test(l)) return false;         // prose, or a lead-in line
+      if (/^(?:[-*•‣–—>]|\d+[.)])\s/.test(l)) return false;  // list item / quote
+      return l.split(/\s+/).length <= 12;
     }
 
     // Remove leftover bits that get read aloud awkwardly: reference markers,
@@ -695,6 +873,34 @@
       }
 
       if (current.trim()) result.push(current.trim());
+      return result;
+    }
+
+    // Chunk the article without letting a chunk straddle a heading: each
+    // heading line becomes a chunk of its own (so the reading view can style
+    // it, and both engines pause after it), and the prose in between is filled
+    // to maxLen exactly as before. Records the kind of each chunk in
+    // chunkKinds, which renderChunks() turns into styling.
+    function chunkArticle(text, maxLen) {
+      const result = [];
+      const kinds = [];
+      let prose = [];
+      const flushProse = () => {
+        if (!prose.length) return;
+        for (const c of splitText(prose.join(" "), maxLen)) { result.push(c); kinds.push("body"); }
+        prose = [];
+      };
+      for (const line of text.split("\n").map(l => l.trim()).filter(Boolean)) {
+        if (isHeadingLine(line)) {
+          flushProse();
+          result.push(line);
+          kinds.push("heading");
+        } else {
+          prose.push(line);
+        }
+      }
+      flushProse();
+      chunkKinds = kinds;
       return result;
     }
 
@@ -816,7 +1022,7 @@
       readerEl.innerHTML = "";
       chunkEls = chunks.map((text, i) => {
         const el = document.createElement("span");
-        el.className = "chunk";
+        el.className = chunkKinds[i] === "heading" ? "chunk heading" : "chunk";
         el.textContent = text;
         el.addEventListener("click", (e) => {
           // Start from the tapped sentence, not just the chunk.
@@ -1112,6 +1318,9 @@
       } else {
         setStatus("Premium quota reached — switching to the free browser voice...");
         cfEnable.checked = false;
+        // Nothing left to configure until the quota resets — fold the section
+        // away (it opens by default, and re-opens if a key is ever needed).
+        premiumSection.open = false;
         // Re-chunk for the browser engine, mapping the position by characters
         // (robust even if the engines' chunk sizes ever diverge again).
         const consumed = chunks.slice(0, chunkIndex).reduce((n, c) => n + c.length + 1, 0) + chunkCharOffset;
@@ -1358,7 +1567,17 @@
     }
 
     function readText(text, startIndex = 0, startChar = null) {
-      const cleaned = text.replace(/\s+/g, " ").trim();
+      // Collapse runs of spaces but keep the line breaks: they carry the
+      // article's structure (headings, list items) into chunkArticle().
+      let lines = text
+        .split(/\r?\n/)
+        .map(l => l.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      // Also trim here, so pasted text gets the same treatment as an extracted
+      // article. Idempotent on already-cleaned text: a trimmed article starts
+      // with prose, which leaves no head zone to scan.
+      if (trimExtras.checked) lines = stripBoilerplate(lines, currentUrl ? articleTitle : "");
+      const cleaned = lines.join("\n");
       if (!cleaned) {
         setStatus("Paste or load article text first.");
         return;
@@ -1367,7 +1586,7 @@
       // Draw the narrator for this reading (a no-op unless "Random" is chosen).
       if (engine === "cloudflare") resolveCfVoice();
       stopAll();
-      chunks = splitText(cleaned, CHUNK_SIZE);
+      chunks = chunkArticle(cleaned, CHUNK_SIZE);
       computeSentenceStarts();
       chunkIndex = Math.max(0, Math.min(startIndex, chunks.length - 1));
       chunkCharOffset = 0;
@@ -1425,19 +1644,27 @@
               ".infobox", ".navbox", ".toc", ".sidebar", ".breadcrumb", ".breadcrumbs",
               ".cookie", ".cookies", ".newsletter", ".advertisement", ".advert", ".ads", ".promo",
               ".social", ".social-share", ".share", ".sharing", ".related", ".related-articles",
+              // Article furniture: cheaper to drop here than to regex out later.
+              // Deliberately NOT <time> — plenty of sites use it mid-sentence.
+              "figcaption", ".byline", ".author", ".author-bio", ".meta", ".post-meta",
+              ".entry-meta", ".article-meta", ".date", ".published", ".timestamp",
+              ".tags", ".comments", "#comments", ".paywall", ".subscribe", ".newsletter-signup",
+              "[aria-label*=share]", "[class*=share-button]",
             ].join(","),
           },
         });
         if (!response.ok) throw new Error("Could not extract this article.");
 
         const raw = await response.text();
-        const text = cleanArticle(raw);
-        if (text.length < 80) throw new Error("The extracted article was too short.");
-
         // Use Jina's "Title:" line when present; otherwise derive from the URL.
+        // Resolved before cleaning, which uses it to drop a repeated headline.
         const titleMatch = raw.match(/^Title:\s*(.+)$/mi);
         articleTitle = titleMatch ? titleMatch[1].trim() : titleFromUrl(url);
 
+        const text = cleanArticle(raw, articleTitle);
+        if (text.length < 80) throw new Error("The extracted article was too short.");
+
+        rawArticle = raw;  // kept so the trim checkbox can re-clean this article
         textArea.value = text;
         currentUrl = url;
         // Resume where this article was last left off, if recent. Map the
@@ -1663,6 +1890,17 @@
     cfEnable.addEventListener("change", () => { snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     cfModel.addEventListener("change", () => { syncCfModelUi(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     cfVoice.addEventListener("change", () => { resolveCfVoice(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
+    // Toggling the trim re-cleans the loaded article in place, keeping the
+    // listening spot (mapped by characters, since the text length changes).
+    trimExtras.addEventListener("change", () => {
+      savePrefs();
+      if (!rawArticle) { reReadIfLoaded(); return; }
+      const consumed = chunks.slice(0, chunkIndex).reduce((n, c) => n + c.length + 1, 0) + chunkCharOffset;
+      const before = textArea.value.length || 1;
+      const text = cleanArticle(rawArticle, articleTitle);
+      textArea.value = text;
+      readText(text, 0, chunks.length ? Math.floor((consumed / before) * text.length) : null);
+    });
     // Persist the access key locally; never leaves this browser except to the Worker.
     cfKey.addEventListener("change", () => {
       localStorage.setItem(CF_KEY_STORAGE, cfKey.value.trim());
@@ -1672,6 +1910,9 @@
     const savedPrefs = loadJson(PREFS_STORAGE);
     if (savedPrefs.rate) rateInput.value = savedPrefs.rate;
     applyRate();  // label + bounds for the -/+ buttons
+    // Trimming is on unless it was explicitly switched off (any prefs version:
+    // it carries no quota history, so it needs no PREFS_VERSION gate).
+    if (typeof savedPrefs.trim === "boolean") trimExtras.checked = savedPrefs.trim;
     // Premium prefs are only honoured from PREFS_VERSION onwards; older entries
     // may have a quota degradation baked in, so fall back to the markup
     // defaults (premium on, Aura-2 — the most capable tier).

@@ -34,7 +34,15 @@ Four passes, in this order (the order is load-bearing):
 
 Tuned against ten live dumps (BBC, Guardian, Ars Technica, The Verge, TechCrunch, NPR, Smashing, dev.to, freeCodeCamp, Wikipedia); typical result is 15–25% off a news page and ~50% off a Wikipedia article (the reference list), with no body prose dropped in any of them. Note `X-Return-Format: text` means Jina returns **no `Title:` line**, so `articleTitle` is normally the URL slug and the title-dedupe rule rarely fires. Known residue: Smashing's newsletter/course promo block above the article, and NPR's membership pitch on very short pages (too small for the tail cut's character guard).
 
-Toggling the checkbox re-cleans the loaded article in place from `rawArticle` (the retained extraction) and resumes at the proportional character position.
+Toggling the checkbox re-cleans the loaded article in place from `rawArticle` (the retained extraction) and resumes at the proportional character position. `stripBoilerplate()` reports its drops through an out-param: `cleanArticle()` puts them in `trimmedLines`, which `renderArticleHeader()` lists under the title (capped at 60 entries) so a bad pattern is visible in the UI, not just in `console.debug`. `readText()` trims too — for pasted text — but skips text equal to `cleanedSource` (cleanArticle's last output), which would otherwise blank that list.
+
+**Article header** — `renderArticleHeader()` shows the title plus the "Trimmed N extras" disclosure whenever chunks exist. `deriveTitle()` prefers Jina's `Title:` line (absent in text mode), then the article's own first heading, then the URL slug — which is why `loadArticle()` resolves a provisional title before cleaning (for the dedupe rule) and the final one after.
+
+**Reading comfort** — `#reader` scales with `--read-scale` (`nudgeReadScale()`, persisted as `read` in `ar_prefs`); `toggleImmersive()` puts the reader full-screen with the transport controls docked at the bottom (Escape exits); and a click on the reader's own background — not a chunk — toggles play/pause, since on a phone the reading pane is most of the screen.
+
+**First-audio latency** — `FIRST_CHUNK_SIZE` (160) caps the first chunk only, so audio starts sooner while `prepareNextCfChunk()` fills the pipeline behind it; the cap is skipped when a heading already opens the article, since a heading chunk is short anyway. `setStatus(msg, busy)` marks a phase as in flight, which the CSS renders as animated dots.
+
+**Offline replay** — `savePosition()` stores the cleaned text alongside the resume position (`TEXT_CACHE_KEEP` most recent articles, `TEXT_CACHE_MAX` per article, and a `catch` that drops all cached text if localStorage is full). `playCached()` plays from that copy with no network when offline or when extraction fails; the recents list marks such entries "✓ saved" and promotes the most recent to a "Continue" card.
 
 **Two TTS engines**, selected by the "Use premium voice" checkbox (`activeEngine()`):
 

@@ -146,6 +146,23 @@
       margin-top: 12px; min-height: 22px; font-weight: 600;
       color: var(--accent);
     }
+    /* Animated dots while a phase is in flight, so a slow extraction or a
+       first-audio wait doesn't look like a hang. */
+    #status.busy::after {
+      content: "";
+      display: inline-block; width: 1.1em; text-align: left;
+      animation: dots 1.2s steps(4, end) infinite;
+    }
+    @keyframes dots { 0% { content: ""; } 25% { content: "·"; } 50% { content: "··"; } 75% { content: "···"; } }
+    /* The most recent in-progress article, promoted to a tappable card. */
+    .recent-item.continue {
+      border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+      background: var(--accent-soft);
+      padding: 11px 12px;
+    }
+    .recent-item.continue .recent-title { font-size: 15px; }
+    .recent-play { font-size: 15px; color: var(--accent); }
+    .recent-offline { font-size: 11px; opacity: 0.6; }
     /* Recently played: in-progress articles you can tap to resume. */
     #recent { margin-top: 10px; display: none; }
     #recent.active { display: block; }
@@ -167,18 +184,66 @@
       background: transparent; border: none; font-size: 15px; opacity: 0.5;
     }
     .recent-remove:hover { opacity: 1; }
+    /* Article title + what the trim removed, shown once an article is loaded. */
+    #articleHeader { display: none; margin-top: 14px; }
+    #articleHeader.active { display: block; }
+    #articleTitleEl {
+      margin: 0; font-size: 19px; line-height: 1.3; font-weight: 700;
+    }
+    #trimInfo { margin-top: 4px; font-size: 13px; opacity: 0.7; }
+    #trimInfo summary { font-weight: 500; cursor: pointer; }
+    #trimInfo[hidden] { display: none; }
+    #trimList {
+      margin-top: 6px; max-height: 30vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 3px;
+      font-size: 12px; scrollbar-width: thin;
+    }
+    #trimList span {
+      flex: 0 0 auto;   /* a scrolling flex column would otherwise squash them */
+      padding: 3px 7px; border-radius: 6px;
+      background: color-mix(in srgb, CanvasText 6%, transparent);
+      text-decoration: line-through; opacity: 0.75;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Reading-view toolbar: text size and full-screen. */
+    #readerBar {
+      display: none; gap: 6px; justify-content: flex-end; margin-top: 12px;
+    }
+    #readerBar.active { display: flex; }
+    #readerBar button { width: auto; padding: 4px 10px; font-size: 13px; }
     /* Reading view: shows the article split into chunks, highlighting the one
-       currently being spoken and auto-scrolling it into view. */
+       currently being spoken and auto-scrolling it into view. `--read-scale` is
+       the user's text-size choice, persisted with the other prefs. */
     #reader {
-      margin-top: 16px;
+      margin-top: 8px;
       max-height: 44vh;
       overflow-y: auto;
       padding: 4px;
       border-radius: 12px;
       display: none;
       scrollbar-width: thin;
+      font-size: calc(16px * var(--read-scale, 1));
     }
     #reader.active { display: block; }
+    /* Full-screen reading mode: the reader takes the viewport and the transport
+       controls dock to the bottom, so following along doesn't cost the
+       playback buttons. */
+    body.immersive { overflow: hidden; }
+    body.immersive #reader {
+      position: fixed; inset: 0 0 92px; z-index: 50;
+      max-height: none; margin: 0; border-radius: 0;
+      padding: 24px max(16px, calc((100vw - 720px) / 2));
+      background: Canvas;
+    }
+    body.immersive .controls {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 51;
+      margin: 0; padding: 12px max(16px, calc((100vw - 720px) / 2));
+      background: color-mix(in srgb, CanvasText 5%, Canvas);
+      border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+    }
+    body.immersive #readerBar {
+      position: fixed; top: 10px; right: 12px; z-index: 52; margin: 0;
+    }
     .chunk {
       display: block;
       padding: 10px 14px;
@@ -300,7 +365,21 @@
 
     <div id="status" aria-live="polite"></div>
 
-    <div id="reader"></div>
+    <div id="articleHeader">
+      <h2 id="articleTitleEl"></h2>
+      <details id="trimInfo">
+        <summary id="trimSummary"></summary>
+        <div id="trimList"></div>
+      </details>
+    </div>
+
+    <div id="readerBar">
+      <button type="button" id="fontDown" class="nudge" aria-label="Smaller text" title="Smaller text">A&minus;</button>
+      <button type="button" id="fontUp" class="nudge" aria-label="Larger text" title="Larger text">A+</button>
+      <button type="button" id="immersiveButton" class="nudge" aria-label="Full-screen reading mode" title="Full-screen reading mode">&#10530;</button>
+    </div>
+
+    <div id="reader" title="Tap a sentence to read from there, or the margin to pause"></div>
 
     <details class="manual">
       <summary>Paste or edit text manually</summary>
@@ -320,6 +399,15 @@
     const rateUp = document.getElementById("rateUp");
     const textArea = document.getElementById("text");
     const trimExtras = document.getElementById("trimExtras");
+    const articleHeader = document.getElementById("articleHeader");
+    const articleTitleEl = document.getElementById("articleTitleEl");
+    const trimInfo = document.getElementById("trimInfo");
+    const trimSummary = document.getElementById("trimSummary");
+    const trimList = document.getElementById("trimList");
+    const readerBar = document.getElementById("readerBar");
+    const fontDown = document.getElementById("fontDown");
+    const fontUp = document.getElementById("fontUp");
+    const immersiveButton = document.getElementById("immersiveButton");
     const statusEl = document.getElementById("status");
     const readerEl = document.getElementById("reader");
     const progressEl = document.getElementById("progress");
@@ -352,6 +440,8 @@
     const POS_STORAGE = "ar_positions";      // per-URL resume positions
     const POS_TTL_MS = 7 * 24 * 60 * 60 * 1000;  // forget resume points after 7 days
     const AUDIO_CACHE_MAX = 40;              // in-memory premium-audio cache cap
+    const TEXT_CACHE_KEEP = 4;               // articles whose text is kept for offline replay
+    const TEXT_CACHE_MAX = 120000;           // ...and the per-article size ceiling
     // Curated, narration-friendly US voices only (no Irish/British/heavy accents).
     const AURA_VOICES = [
       "asteria", "luna", "stella", "hera",   // female
@@ -367,6 +457,7 @@
     const RANDOM_VOICE = "random";
     let activeCfVoice = "";
     const CHUNK_SIZE = 400;      // both engines; also bounds premium first-audio latency
+    const FIRST_CHUNK_SIZE = 160;  // the chunk the listener actually waits for
     const CHARS_PER_SEC = 15;    // rough TTS reading speed at rate 1.0, for ETA
 
     const PLAY_ICON = "▶";   // ▶
@@ -418,6 +509,9 @@
     let chunkEls = [];            // rendered chunk elements in the reading view
     let currentUrl = "";          // article URL for resume tracking ("" = pasted text)
     let rawArticle = "";          // last extraction, re-cleaned when trimming is toggled
+    let trimmedLines = [];        // what the last clean removed, listed under the title
+    let cleanedSource = "";       // cleanArticle()'s last output, so readText() doesn't re-trim it
+    let readScale = 1;            // reading-view text size multiplier
     let articleTitle = "Article"; // for the lock-screen / media metadata
     const audioCache = new Map(); // key `${model}|${voice}|${text}` -> Blob (session only)
 
@@ -435,8 +529,11 @@
       return cfEnable.checked ? "cloudflare" : "browser";
     }
 
-    function setStatus(message) {
+    // `busy` marks a phase that is still in flight, which the CSS turns into
+    // animated dots so a slow extraction doesn't read as a hang.
+    function setStatus(message, busy = false) {
       statusEl.textContent = message;
+      statusEl.classList.toggle("busy", busy);
     }
 
     // --- Persistence (preferences + resume position) -----------------------
@@ -479,19 +576,38 @@
         cfModel: cf.model,
         cfVoice: cf.voice,
         trim: trimExtras.checked,
+        read: readScale,
       }));
     }
 
     function savePosition() {
       if (!currentUrl || !chunks.length) return;
       const all = loadJson(POS_STORAGE);
-      all[currentUrl] = { index: chunkIndex, total: chunks.length, t: Date.now(), title: articleTitle };
+      const text = chunks.join("\n");
+      all[currentUrl] = {
+        index: chunkIndex, total: chunks.length, t: Date.now(), title: articleTitle,
+        // The cleaned text rides along so the article can be replayed with no
+        // network — offline, or when extraction later fails.
+        text: text.length <= TEXT_CACHE_MAX ? text : "",
+      };
       // Prune entries older than the TTL so the store can't grow forever.
       const now = Date.now();
       for (const k of Object.keys(all)) {
         if (now - (all[k].t || 0) > POS_TTL_MS) delete all[k];
       }
-      localStorage.setItem(POS_STORAGE, JSON.stringify(all));
+      // Only the few most recent articles keep their text; the rest keep just
+      // the position, which is all the recents list needs.
+      Object.entries(all)
+        .sort((a, b) => b[1].t - a[1].t)
+        .slice(TEXT_CACHE_KEEP)
+        .forEach(([k]) => { all[k].text = ""; });
+      try {
+        localStorage.setItem(POS_STORAGE, JSON.stringify(all));
+      } catch {
+        // Storage full: positions matter more than cached text.
+        for (const k of Object.keys(all)) all[k].text = "";
+        try { localStorage.setItem(POS_STORAGE, JSON.stringify(all)); } catch {}
+      }
     }
 
     function getPosition(url) {
@@ -533,16 +649,25 @@
         .slice(0, 5);
       recentEl.innerHTML = "";
       recentEl.classList.toggle("active", items.length > 0);
-      for (const [url, p] of items) {
+      items.forEach(([url, p], i) => {
         const item = document.createElement("div");
-        item.className = "recent-item";
+        // The most recent article is promoted to a "continue" card: resuming
+        // one thing is the common case, picking from a list is the rare one.
+        item.className = i === 0 ? "recent-item continue" : "recent-item";
         const title = document.createElement("span");
         title.className = "recent-title";
-        title.textContent = p.title || titleFromUrl(url);
+        title.textContent = (i === 0 ? "Continue: " : "") + (p.title || titleFromUrl(url));
         const meta = document.createElement("span");
         meta.className = "recent-meta";
         const pct = p.total ? Math.round(((p.index + 1) / p.total) * 100) : 0;
         meta.textContent = `${pct}% · ${timeAgo(p.t || now)}`;
+        if (p.text) {
+          const offline = document.createElement("span");
+          offline.className = "recent-offline";
+          offline.textContent = "✓ saved";
+          offline.title = "Saved for offline listening";
+          meta.append(" ", offline);
+        }
         const remove = document.createElement("button");
         remove.className = "recent-remove";
         remove.textContent = "✕";
@@ -552,13 +677,19 @@
           removePosition(url);
           renderRecent();
         });
+        if (i === 0) {
+          const play = document.createElement("span");
+          play.className = "recent-play";
+          play.textContent = "▶";
+          item.append(play);
+        }
         item.append(title, meta, remove);
         item.addEventListener("click", () => {
           urlInput.value = url;
           loadArticle();
         });
         recentEl.appendChild(item);
-      }
+      });
     }
 
     // --- Premium audio cache (in-memory, this page session only) -----------
@@ -641,11 +772,15 @@
       // Page furniture (dates, bylines, share links, related lists) — opt-out
       // via the "Trim article extras" checkbox. Runs before the period pass so
       // the patterns see the line exactly as the page wrote it.
-      if (trimExtras.checked) lines = stripBoilerplate(lines, title);
-      return lines
+      if (trimExtras.checked) {
+        trimmedLines = [];
+        lines = stripBoilerplate(lines, title, trimmedLines);
+      }
+      cleanedSource = lines
         .map(l => isHeadingLine(l) || /[.!?…:;)\]"'’”]$/.test(l) ? l : l + ".")
         .join("\n")
         .trim();
+      return cleanedSource;
     }
 
     // --- Boilerplate trimming ------------------------------------------------
@@ -785,14 +920,31 @@
       /^(?:references|external links|bibliography|notes|footnotes|further reading|citations|sources)$/i,
       /^for further actions\b.*$/i,               // dev.to's end-of-post block
       /^(?:top comments?|add to the discussion)\b.*$/i,
+      /^explore more on$/i,
       /^(?:prev|previous|next) story$/i,
-      // The closing byline block: a name glued to a job title, then the bio.
+      // The closing byline: a name glued to a job title (the bio underneath it
+      // is matched separately, by isBioLine).
       /^[^.!?]{0,80}\b(?:correspondent|reporter|editor|columnist|commentator|analyst|contributor|staff writer|news writer|science editor)s?$/i,
-      // Author bio, third person ("Jane Doe is a reporter covering X") or first
-      // ("I'm a teacher and developer with ...").
-      /^[\w.'’-]+(?:\s+[\w.'’-]+){1,3}\s+is\s+(?:an?|the)\s+.{0,160}$/i,
-      /^i'?m\s+(?:an?|the)\s+.{0,160}$/i,
     ];
+
+    // Job titles, the second half of what makes a line an author bio.
+    const ROLE_RE = /\b(?:reporter|editor|writer|journalist|correspondent|columnist|author|founder|engineer|developer|designer|teacher|professor|researcher|analyst|consultant|coach|host|producer|contributor|blogger|scientist|photographer|critic|anchor)s?\b/i;
+
+    // "Jane Doe is a reporter covering energy" / "I'm a teacher and developer".
+    // Two independent requirements, because "X is a Y" is also an ordinary
+    // sentence: the subject must be name-shaped (no stop words — that's what
+    // keeps "The Schengen Area is a system of open borders" as article text)
+    // and the predicate must name a job.
+    // `shortName` allows a first-name-only subject ("Andy is a design founder"),
+    // which is only safe where the position already says it's a bio — under an
+    // "About the author" heading, or above the article's first paragraph.
+    function isBioLine(line, shortName = false) {
+      const names = shortName ? "{0,3}" : "{1,3}";
+      const m = line.match(new RegExp(`^([\\w.'’-]+(?:\\s+[\\w.'’-]+)${names})\\s+is\\s+(?:an?|the)\\s+(.{0,160})$`, "i")) ||
+                line.match(/^(I)'?m\s+(?:an?|the)\s+(.{0,160})$/i);
+      if (!m || NAME_STOPWORDS.test(m[1])) return false;
+      return ROLE_RE.test(m[2]);
+    }
 
     // Words that a person's name doesn't contain — used to tell a byline
     // ("Kirsten Korosec") from a Title-Cased headline ("The Future Of Work").
@@ -849,8 +1001,7 @@
     // four passes. Order matters: junk and nav go first so the head zone is
     // located in what's left — real pages open with consent paragraphs and nav
     // blobs long enough to look like the first prose paragraph otherwise.
-    function stripBoilerplate(lines, title = "") {
-      const dropped = [];
+    function stripBoilerplate(lines, title = "", dropped = []) {
       let kept = cutTail(lines, dropped);
       let afterAuthorBox = false;
       kept = kept.filter((l, i) => {
@@ -860,8 +1011,10 @@
         // rather than by the tail rules.
         // The same bio also appears directly under the headline on some sites
         // (The Verge), where it precedes the article's first paragraph.
-        const bioShaped = /^[\w.'’-]+(?:\s+[\w.'’-]+){0,3}\s+is\s+(?:an?|the)\s/i.test(l);
-        const bio = bioShaped && (afterAuthorBox || i < 8);
+        // Directly under an "About the author" heading, position is evidence
+        // enough — that paragraph is the bio whatever shape it takes. Higher up
+        // the page it has to look like one.
+        const bio = afterAuthorBox ? l.length <= 400 : (i < 8 && isBioLine(l, true));
         afterAuthorBox = /^about the author/i.test(l);
         if (!isJunkLine(l) && !consent && !bio) return true;
         dropped.push(l);
@@ -914,8 +1067,8 @@
         return !drop;
       });
 
-      // Auditable: every drop is visible in the console, so a bad pattern can be
-      // spotted without guessing.
+      // Auditable twice over: the caller lists the drops under the title, and
+      // the console keeps the full detail for tuning a pattern.
       if (dropped.length) console.debug("[article-reader] trimmed extras:", dropped);
       return kept;
     }
@@ -935,7 +1088,7 @@
         // length cap is what keeps prose like "Related work continues at..."
         // from ending the article.
         const strong = STRONG_TAIL_RE.some(re => re.test(lines[i]));
-        const matches = strong || TAIL_CUT_RE.some(re => re.test(lines[i]));
+        const matches = strong || isBioLine(lines[i]) || TAIL_CUT_RE.some(re => re.test(lines[i]));
         if (matches && lines[i].length <= 160 &&
             (strong || i >= tailStart) &&
             charsAbove >= totalChars * (strong ? 0.4 : 0.6) &&
@@ -1073,7 +1226,20 @@
       let prose = [];
       const flushProse = () => {
         if (!prose.length) return;
-        for (const c of splitText(prose.join(" "), maxLen)) { result.push(c); kinds.push("body"); }
+        let text = prose.join(" ");
+        // The very first chunk is capped short: it's the one the listener waits
+        // on, and the double-buffered prefetch has the rest ready by the time
+        // it ends. Skipped when a heading already opened the article, since a
+        // heading chunk is short anyway.
+        if (!result.length) {
+          const parts = splitText(text, FIRST_CHUNK_SIZE);
+          if (parts.length > 1) {
+            result.push(parts[0]);
+            kinds.push("body");
+            text = parts.slice(1).join(" ");
+          }
+        }
+        for (const c of splitText(text, maxLen)) { result.push(c); kinds.push("body"); }
         prose = [];
       };
       for (const line of text.split("\n").map(l => l.trim()).filter(Boolean)) {
@@ -1221,7 +1387,66 @@
       });
       readerEl.classList.toggle("active", chunks.length > 0);
       progressEl.classList.toggle("active", chunks.length > 0);
+      renderArticleHeader();
       updateProgress();
+    }
+
+    // --- Article header (title + what the trim removed) ---------------------
+
+    function renderArticleHeader() {
+      const show = chunks.length > 0;
+      articleHeader.classList.toggle("active", show);
+      readerBar.classList.toggle("active", show);
+      articleTitleEl.textContent = show ? articleTitle : "";
+      const n = trimmedLines.length;
+      trimInfo.hidden = !show || !n;
+      trimInfo.open = false;
+      if (!n) return;
+      trimSummary.textContent = `Trimmed ${n} extra${n === 1 ? "" : "s"} — show`;
+      trimList.innerHTML = "";
+      // Cap the list: a Wikipedia reference section runs to hundreds of lines.
+      for (const line of trimmedLines.slice(0, 60)) {
+        const el = document.createElement("span");
+        el.textContent = line;
+        el.title = line;
+        trimList.appendChild(el);
+      }
+      if (n > 60) {
+        const more = document.createElement("span");
+        more.textContent = `…and ${n - 60} more`;
+        trimList.appendChild(more);
+      }
+    }
+
+    // Jina's text mode returns no "Title:" line, so the best available title is
+    // usually the article's own first heading; the URL slug is the fallback.
+    function deriveTitle(cleaned, url, jinaTitle) {
+      if (jinaTitle) return jinaTitle;
+      const first = cleaned.split("\n")[0] || "";
+      if (first && isHeadingLine(first) && first.length >= 12) return first;
+      return titleFromUrl(url);
+    }
+
+    // --- Reading view comfort ----------------------------------------------
+
+    function applyReadScale() {
+      readerEl.style.setProperty("--read-scale", readScale.toFixed(2));
+      fontDown.disabled = readScale <= 0.85;
+      fontUp.disabled = readScale >= 1.8;
+    }
+
+    function nudgeReadScale(step) {
+      readScale = Math.min(1.8, Math.max(0.85, Math.round((readScale + step) * 100) / 100));
+      applyReadScale();
+      savePrefs();
+    }
+
+    function toggleImmersive(force) {
+      const on = force !== undefined ? force : !document.body.classList.contains("immersive");
+      document.body.classList.toggle("immersive", on);
+      immersiveButton.setAttribute("aria-pressed", String(on));
+      immersiveButton.title = on ? "Exit full-screen reading mode" : "Full-screen reading mode";
+      if (on && chunkEls[chunkIndex]) chunkEls[chunkIndex].scrollIntoView({ block: "center" });
     }
 
     function updateProgress() {
@@ -1524,7 +1749,7 @@
       const token = ++cfPlayToken;
       highlightChunk(chunkIndex);
       buildSentenceSpans(chunkIndex);  // highlighted as the audio progresses
-      setStatus(`Generating audio (part ${chunkIndex + 1} of ${chunks.length})...`);
+      setStatus(`Generating audio (part ${chunkIndex + 1} of ${chunks.length})`, true);
       try {
         const blob = await fetchCfAudio(chunks[chunkIndex]);
         if (token !== cfPlayToken) return;  // superseded by a skip/stop/re-read
@@ -1760,9 +1985,12 @@
         .map(l => l.replace(/\s+/g, " ").trim())
         .filter(Boolean);
       // Also trim here, so pasted text gets the same treatment as an extracted
-      // article. Idempotent on already-cleaned text: a trimmed article starts
-      // with prose, which leaves no head zone to scan.
-      if (trimExtras.checked) lines = stripBoilerplate(lines, currentUrl ? articleTitle : "");
+      // article — but skip text that cleanArticle() just produced, which is
+      // trimmed already and whose drop list is the one the UI is showing.
+      if (trimExtras.checked && lines.join("\n") !== cleanedSource) {
+        trimmedLines = [];
+        lines = stripBoilerplate(lines, "", trimmedLines);
+      }
       const cleaned = lines.join("\n");
       if (!cleaned) {
         setStatus("Paste or load article text first.");
@@ -1799,6 +2027,20 @@
       }
     }
 
+    // Play an article straight from the text saved with its resume position —
+    // no network at all. Used when offline and when extraction fails.
+    function playCached(url, pos) {
+      rawArticle = "";           // no raw extraction to re-clean from
+      trimmedLines = [];         // the cached text was already trimmed
+      articleTitle = pos.title || titleFromUrl(url);
+      textArea.value = pos.text;
+      currentUrl = url;
+      readText(pos.text, 0, pos.index > 0
+        ? Math.floor((pos.index / Math.max(pos.total || 1, 1)) * pos.text.length)
+        : null);
+      setStatus(`Playing the saved copy of this article${navigator.onLine ? "" : " (offline)"}`);
+    }
+
     async function loadArticle() {
       const url = urlInput.value.trim();
       if (!/^https?:\/\//i.test(url)) {
@@ -1811,7 +2053,18 @@
       restorePreferredCf();
 
       loadButton.disabled = true;
-      setStatus("Extracting article text...");
+      setStatus("Extracting article text", true);
+
+      // Offline (or a dead network): fall back to the text cached with this
+      // article's resume position, so a saved article still plays.
+      if (!navigator.onLine) {
+        const cached = getPosition(url);
+        if (cached && cached.text) {
+          playCached(url, cached);
+          loadButton.disabled = false;
+          return;
+        }
+      }
 
       try {
         const readerUrl = `https://r.jina.ai/${url}`;
@@ -1842,13 +2095,18 @@
         if (!response.ok) throw new Error("Could not extract this article.");
 
         const raw = await response.text();
+        setStatus("Cleaning up the text", true);
         // Use Jina's "Title:" line when present; otherwise derive from the URL.
         // Resolved before cleaning, which uses it to drop a repeated headline.
         const titleMatch = raw.match(/^Title:\s*(.+)$/mi);
-        articleTitle = titleMatch ? titleMatch[1].trim() : titleFromUrl(url);
+        const jinaTitle = titleMatch ? titleMatch[1].trim() : "";
+        articleTitle = jinaTitle || titleFromUrl(url);
 
         const text = cleanArticle(raw, articleTitle);
         if (text.length < 80) throw new Error("The extracted article was too short.");
+        // Text mode returns no "Title:" line, so prefer the article's own first
+        // heading over the URL slug now that the text is clean.
+        articleTitle = deriveTitle(text, url, jinaTitle);
 
         rawArticle = raw;  // kept so the trim checkbox can re-clean this article
         textArea.value = text;
@@ -1861,10 +2119,18 @@
           ? Math.floor((pos.index / Math.max(pos.total || 1, 1)) * text.length)
           : null);
         if (pos && pos.index > 0) {
-          setStatus(`Resuming at part ${chunkIndex + 1} of ${chunks.length}...`);
+          setStatus(`Resuming at part ${chunkIndex + 1} of ${chunks.length}`, true);
         }
       } catch (error) {
-        // Extraction failed -> nothing will play, so make sure controls reflect idle.
+        // Extraction failed. If this article was played before, its text is
+        // cached with the resume position — use that rather than giving up.
+        const cached = getPosition(url);
+        if (cached && cached.text) {
+          playCached(url, cached);
+          loadButton.disabled = false;
+          return;
+        }
+        // Nothing will play, so make sure controls reflect idle.
         setControls("idle");
         setStatus(`${error.message} Paste the article text below and press "Read pasted text".`);
       } finally {
@@ -1971,6 +2237,12 @@
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
                 t.tagName === "SELECT" || t.tagName === "BUTTON" ||
                 t.isContentEditable)) return;
+      // Escape leaves full-screen reading mode even when nothing is playing.
+      if (e.key === "Escape" && document.body.classList.contains("immersive")) {
+        e.preventDefault();
+        toggleImmersive(false);
+        return;
+      }
       if (playbackState === "idle") return;
       if (e.key === " " || e.key === "k") {
         e.preventDefault();
@@ -2076,6 +2348,15 @@
     cfEnable.addEventListener("change", () => { snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     cfModel.addEventListener("change", () => { syncCfModelUi(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     cfVoice.addEventListener("change", () => { resolveCfVoice(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
+    fontDown.addEventListener("click", () => nudgeReadScale(-0.1));
+    fontUp.addEventListener("click", () => nudgeReadScale(0.1));
+    immersiveButton.addEventListener("click", () => toggleImmersive());
+    // Tapping the reader's margin (not a sentence) pauses — on a phone the
+    // reading pane is most of the screen and the play button is a small target.
+    readerEl.addEventListener("click", (e) => {
+      if (e.target === readerEl && playbackState !== "idle") togglePlayPause();
+    });
+
     // Toggling the trim re-cleans the loaded article in place, keeping the
     // listening spot (mapped by characters, since the text length changes).
     trimExtras.addEventListener("change", () => {
@@ -2099,6 +2380,8 @@
     // Trimming is on unless it was explicitly switched off (any prefs version:
     // it carries no quota history, so it needs no PREFS_VERSION gate).
     if (typeof savedPrefs.trim === "boolean") trimExtras.checked = savedPrefs.trim;
+    if (Number(savedPrefs.read) >= 0.85 && Number(savedPrefs.read) <= 1.8) readScale = Number(savedPrefs.read);
+    applyReadScale();
     // Premium prefs are only honoured from PREFS_VERSION onwards; older entries
     // may have a quota degradation baked in, so fall back to the markup
     // defaults (premium on, Aura-2 — the most capable tier).

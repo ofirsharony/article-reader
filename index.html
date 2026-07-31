@@ -198,12 +198,26 @@
       display: flex; flex-direction: column; gap: 3px;
       font-size: 12px; scrollbar-width: thin;
     }
-    #trimList span {
+    #trimList span, #trimList button {
       flex: 0 0 auto;   /* a scrolling flex column would otherwise squash them */
-      padding: 3px 7px; border-radius: 6px;
+      width: auto; margin: 0; text-align: left; font: inherit;
+      padding: 3px 7px; border-radius: 6px; border: none;
       background: color-mix(in srgb, CanvasText 6%, transparent);
+      color: CanvasText;
       text-decoration: line-through; opacity: 0.75;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #trimList button.trim-line { cursor: pointer; }
+    #trimList button.trim-line:hover {
+      text-decoration: none; opacity: 1;
+      background: color-mix(in srgb, var(--accent) 16%, transparent);
+    }
+    /* Hovering says what the click will do: keep this line, on this site. */
+    #trimList button.trim-line:hover::before { content: "↩ keep  "; font-weight: 700; }
+    #trimList .trim-more { text-decoration: none; background: none; }
+    #trimList button.trim-reset {
+      margin-top: 6px; text-decoration: none; cursor: pointer;
+      background: none; color: var(--accent); opacity: 1; font-weight: 600;
     }
     /* Reading-view toolbar: text size and full-screen. */
     #readerBar {
@@ -241,6 +255,15 @@
       background: color-mix(in srgb, CanvasText 5%, Canvas);
       border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
     }
+    /* Shown while a press-and-hold speed boost is active. */
+    #boostPill {
+      position: fixed; z-index: 60; left: 50%; transform: translateX(-50%);
+      bottom: 24px; padding: 6px 14px; border-radius: 999px;
+      background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
+      display: none; pointer-events: none;
+    }
+    #boostPill.active { display: block; }
+    body.immersive #boostPill { bottom: 104px; }
     body.immersive #readerBar {
       position: fixed; top: 10px; right: 12px; z-index: 52; margin: 0;
     }
@@ -379,7 +402,8 @@
       <button type="button" id="immersiveButton" class="nudge" aria-label="Full-screen reading mode" title="Full-screen reading mode">&#10530;</button>
     </div>
 
-    <div id="reader" title="Tap a sentence to read from there, or the margin to pause"></div>
+    <div id="reader" title="Tap a sentence to read from there, or the margin to pause. Swipe for the next sentence, hold to speed up."></div>
+    <div id="boostPill" aria-hidden="true"></div>
 
     <details class="manual">
       <summary>Paste or edit text manually</summary>
@@ -408,6 +432,7 @@
     const fontDown = document.getElementById("fontDown");
     const fontUp = document.getElementById("fontUp");
     const immersiveButton = document.getElementById("immersiveButton");
+    const boostPill = document.getElementById("boostPill");
     const statusEl = document.getElementById("status");
     const readerEl = document.getElementById("reader");
     const progressEl = document.getElementById("progress");
@@ -440,6 +465,9 @@
     const POS_STORAGE = "ar_positions";      // per-URL resume positions
     const POS_TTL_MS = 7 * 24 * 60 * 60 * 1000;  // forget resume points after 7 days
     const AUDIO_CACHE_MAX = 40;              // in-memory premium-audio cache cap
+    const RULES_STORAGE = "ar_trim_rules";   // per-site "keep this line" corrections
+    const RULES_SITES_MAX = 40;              // sites remembered, LRU beyond that
+    const RULES_PER_SITE_MAX = 50;           // corrections per site
     const TEXT_CACHE_KEEP = 4;               // articles whose text is kept for offline replay
     const TEXT_CACHE_MAX = 120000;           // ...and the per-article size ceiling
     // Curated, narration-friendly US voices only (no Irish/British/heavy accents).
@@ -512,6 +540,8 @@
     let trimmedLines = [];        // what the last clean removed, listed under the title
     let cleanedSource = "";       // cleanArticle()'s last output, so readText() doesn't re-trim it
     let readScale = 1;            // reading-view text size multiplier
+    let boostRate = 0;            // press-and-hold speed multiplier (0 = off)
+    let trimHost = "";            // hostname whose trim corrections apply ("" = pasted text)
     let articleTitle = "Article"; // for the lock-screen / media metadata
     const audioCache = new Map(); // key `${model}|${voice}|${text}` -> Blob (session only)
 
@@ -621,6 +651,53 @@
       const all = loadJson(POS_STORAGE);
       delete all[currentUrl];
       localStorage.setItem(POS_STORAGE, JSON.stringify(all));
+    }
+
+    // --- Per-site trim corrections ------------------------------------------
+    // Tapping a line in the "Trimmed N extras" list says "this isn't junk on
+    // this site" — and nav labels repeat verbatim across a site, so the
+    // correction is keyed by hostname rather than by URL and transfers to every
+    // later article there. Stored as normalized text, not a hash, so the rule
+    // stays inspectable. Corrections are preferences: no TTL, just LRU caps.
+
+    function siteKey(url) {
+      try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }
+    }
+
+    function normLine(line) {
+      return line.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim().slice(0, 100);
+    }
+
+    function loadRules() {
+      const all = loadJson(RULES_STORAGE);
+      return all && all.v === 1 && all.sites ? all : { v: 1, sites: {} };
+    }
+
+    // The lines this site is allowed to keep, as a Set for the hot path.
+    function keepSet(host) {
+      const site = host && loadRules().sites[host];
+      return new Set(site ? site.keep : []);
+    }
+
+    function addKeepRule(host, line) {
+      if (!host) return;
+      const all = loadRules();
+      const site = all.sites[host] || { keep: [], t: 0 };
+      const norm = normLine(line);
+      if (!site.keep.includes(norm)) site.keep.push(norm);
+      // Newest corrections win when the cap bites.
+      site.keep = site.keep.slice(-RULES_PER_SITE_MAX);
+      site.t = Date.now();
+      all.sites[host] = site;
+      const hosts = Object.entries(all.sites).sort((a, b) => b[1].t - a[1].t);
+      all.sites = Object.fromEntries(hosts.slice(0, RULES_SITES_MAX));
+      try { localStorage.setItem(RULES_STORAGE, JSON.stringify(all)); } catch {}
+    }
+
+    function clearSiteRules(host) {
+      const all = loadRules();
+      delete all.sites[host];
+      try { localStorage.setItem(RULES_STORAGE, JSON.stringify(all)); } catch {}
     }
 
     // --- Recently played ----------------------------------------------------
@@ -1002,9 +1079,15 @@
     // located in what's left — real pages open with consent paragraphs and nav
     // blobs long enough to look like the first prose paragraph otherwise.
     function stripBoilerplate(lines, title = "", dropped = []) {
-      let kept = cutTail(lines, dropped);
+      // Lines this site was told to keep (see addKeepRule). Checked in every
+      // pass rather than re-inserted afterwards, so order is never disturbed.
+      const siteKeep = keepSet(trimHost);
+      const protectedLine = (l) => siteKeep.size > 0 && siteKeep.has(normLine(l));
+
+      let kept = cutTail(lines, dropped, protectedLine);
       let afterAuthorBox = false;
       kept = kept.filter((l, i) => {
+        if (protectedLine(l)) return true;
         const consent = i < 25 && CONSENT_TOPIC_RE.test(l) && CONSENT_UI_RE.test(l);
         // An author box ("About the author" + one bio paragraph) can sit above
         // the article, not just below it, so the bio is matched by position
@@ -1028,7 +1111,10 @@
       // paragraphs. Skipped entirely if such runs are most of the page — that
       // means a link roundup, where the "nav" is the content.
       const runs = [];
-      const label = (i) => i < kept.length && isLabelLine(kept[i], i < 15);
+      // A protected line is never a run member, which also breaks the run
+      // around it — exactly what "keep this heading" should mean.
+      const label = (i) => i < kept.length && !protectedLine(kept[i]) &&
+        isLabelLine(kept[i], i < 15);
       for (let i = 0; i < kept.length; i++) {
         if (!label(i)) continue;
         let j = i;
@@ -1058,7 +1144,7 @@
       const titleNorm = norm(title);
       let lastDropped = false;
       kept = kept.filter((line, i) => {
-        if (i >= headEnd) return true;
+        if (i >= headEnd || protectedLine(line)) return true;
         // The headline often repeats the page title, which we already track.
         const dupTitle = titleNorm && norm(line) === titleNorm;
         const drop = dupTitle || headScore(line, lastDropped) >= 3;
@@ -1079,14 +1165,16 @@
     // the cut is gone. The guard is character-based, not line-based: the cut
     // only stands if most of the text is still above it, so a mid-article
     // "Read more" box can't take the second half of the article with it.
-    function cutTail(lines, dropped) {
+    function cutTail(lines, dropped, protectedLine = () => false) {
       const totalChars = lines.reduce((n, l) => n + l.length, 0);
       const tailStart = Math.max(1, lines.length - 60);
       let charsAbove = 0;
       for (let i = 0; i < lines.length; i++) {
         // A cut marker is a label or a link line, never a full paragraph — the
         // length cap is what keeps prose like "Related work continues at..."
-        // from ending the article.
+        // from ending the article. A marker the site was told to keep can't
+        // start a cut either.
+        if (protectedLine(lines[i])) { charsAbove += lines[i].length; continue; }
         const strong = STRONG_TAIL_RE.some(re => re.test(lines[i]));
         const matches = strong || isBioLine(lines[i]) || TAIL_CUT_RE.some(re => re.test(lines[i]));
         if (matches && lines[i].length <= 160 &&
@@ -1377,6 +1465,7 @@
         el.className = chunkKinds[i] === "heading" ? "chunk heading" : "chunk";
         el.textContent = text;
         el.addEventListener("click", (e) => {
+          if (suppressClick) { suppressClick = false; return; }  // that was a gesture
           // Start from the tapped sentence, not just the chunk.
           const pos = charOffsetFromPoint(el, e.clientX, e.clientY);
           const starts = sentenceStarts[i] || [0];
@@ -1399,23 +1488,70 @@
       readerBar.classList.toggle("active", show);
       articleTitleEl.textContent = show ? articleTitle : "";
       const n = trimmedLines.length;
-      trimInfo.hidden = !show || !n;
+      const hasRules = Boolean(trimHost) && keepSet(trimHost).size > 0;
+      trimInfo.hidden = !show || (!n && !hasRules);
       trimInfo.open = false;
-      if (!n) return;
-      trimSummary.textContent = `Trimmed ${n} extra${n === 1 ? "" : "s"} — show`;
+      if (trimInfo.hidden) return;
+      trimSummary.textContent = n
+        ? `Trimmed ${n} extra${n === 1 ? "" : "s"} — show`
+        : "Nothing trimmed — show settings";
       trimList.innerHTML = "";
       // Cap the list: a Wikipedia reference section runs to hundreds of lines.
       for (const line of trimmedLines.slice(0, 60)) {
-        const el = document.createElement("span");
+        const el = document.createElement("button");
+        el.type = "button";
+        el.className = "trim-line";
         el.textContent = line;
-        el.title = line;
+        el.title = trimHost
+          ? `Keep this line — always, on ${trimHost}`
+          : "Keep this line (load an article by URL to remember it)";
+        el.addEventListener("click", () => keepTrimmedLine(line));
         trimList.appendChild(el);
       }
       if (n > 60) {
         const more = document.createElement("span");
+        more.className = "trim-more";
         more.textContent = `…and ${n - 60} more`;
         trimList.appendChild(more);
       }
+      if (hasRules) {
+        const reset = document.createElement("button");
+        reset.type = "button";
+        reset.className = "trim-reset";
+        reset.textContent = `Reset kept lines for ${trimHost}`;
+        reset.addEventListener("click", () => {
+          clearSiteRules(trimHost);
+          recleanInPlace();
+        });
+        trimList.appendChild(reset);
+      }
+    }
+
+    // "This isn't junk on this site." Remembered per hostname, then applied
+    // immediately if the raw extraction is still around to re-clean.
+    function keepTrimmedLine(line) {
+      if (!trimHost) {
+        setStatus("Load an article by URL to remember kept lines per site.");
+        return;
+      }
+      addKeepRule(trimHost, line);
+      if (!rawArticle) {
+        setStatus("Saved — this line will be kept next time you open this site.");
+        renderArticleHeader();
+        return;
+      }
+      recleanInPlace();
+    }
+
+    // Re-clean the loaded article from the retained extraction and carry the
+    // listening position across (the text length changes, so map by character).
+    function recleanInPlace() {
+      if (!rawArticle) return;
+      const consumed = chunks.slice(0, chunkIndex).reduce((n, c) => n + c.length + 1, 0) + chunkCharOffset;
+      const before = textArea.value.length || 1;
+      const text = cleanArticle(rawArticle, articleTitle);
+      textArea.value = text;
+      readText(text, 0, chunks.length ? Math.floor((consumed / before) * text.length) : null);
     }
 
     // Jina's text mode returns no "Title:" line, so the best available title is
@@ -1790,7 +1926,7 @@
       if (cfObjectUrls[slot]) URL.revokeObjectURL(cfObjectUrls[slot]);
       cfObjectUrls[slot] = URL.createObjectURL(blob);
       el.src = cfObjectUrls[slot];
-      el.playbackRate = Number(rateInput.value);
+      el.playbackRate = liveRate();   // setting src resets it; keep any hold boost
       el.load();  // start buffering now, not at play() time
       return el;
     }
@@ -2031,6 +2167,7 @@
     // no network at all. Used when offline and when extraction fails.
     function playCached(url, pos) {
       rawArticle = "";           // no raw extraction to re-clean from
+      trimHost = siteKey(url);
       trimmedLines = [];         // the cached text was already trimmed
       articleTitle = pos.title || titleFromUrl(url);
       textArea.value = pos.text;
@@ -2051,6 +2188,7 @@
       // Every new article starts at the user's chosen premium tier — normally
       // Aura-2 — even if the previous one was degraded by a quota fallback.
       restorePreferredCf();
+      trimHost = siteKey(url);   // this site's "keep this line" corrections
 
       loadButton.disabled = true;
       setStatus("Extracting article text", true);
@@ -2143,9 +2281,28 @@
     function applyRate() {
       const rate = Number(rateInput.value);
       rateValue.textContent = rate.toFixed(2);
-      cfPlayers.forEach((el) => { el.playbackRate = rate; });
+      cfPlayers.forEach((el) => { el.playbackRate = liveRate(); });
       rateDown.disabled = rate <= Number(rateInput.min);
       rateUp.disabled = rate >= Number(rateInput.max);
+    }
+
+    // The rate actually applied to audio right now: the slider's, unless a
+    // press-and-hold boost is active. Kept separate from the slider so the
+    // boost is never persisted and never re-speaks the browser engine.
+    function liveRate() {
+      const rate = Number(rateInput.value) || 1;
+      return boostRate ? Math.min(Number(rateInput.max), rate * boostRate) : rate;
+    }
+
+    function setBoost(on) {
+      // Premium only: speechSynthesis can't change rate mid-utterance, so a
+      // hold gesture there would mean re-speaking the sentence twice.
+      if (on && (activeEngine() !== "cloudflare" || playbackState !== "playing")) return;
+      if (!on && !boostRate) return;
+      boostRate = on ? 2 : 0;
+      cfPlayers.forEach((el) => { el.playbackRate = liveRate(); });
+      boostPill.classList.toggle("active", Boolean(boostRate));
+      if (boostRate) boostPill.textContent = `${liveRate().toFixed(2)}×`;
     }
 
     // speechSynthesis can't change rate mid-utterance, so once the new speed is
@@ -2348,12 +2505,67 @@
     cfEnable.addEventListener("change", () => { snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     cfModel.addEventListener("change", () => { syncCfModelUi(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
     cfVoice.addEventListener("change", () => { resolveCfVoice(); snapshotCfPrefs(); savePrefs(); reReadIfLoaded(); });
+    // --- Touch gestures on the reading view ---------------------------------
+    // The phone is the primary device here, and it had only buttons. A pointer
+    // that moved or was held is a gesture, not a tap, so `suppressClick` stops
+    // it also landing as a tap-to-seek on the sentence underneath.
+    const SWIPE_MIN = 50;        // px before a drag counts as a swipe
+    const TAP_SLOP = 10;         // px of movement still considered a tap
+    const HOLD_MS = 400;         // press-and-hold before the speed boost kicks in
+    let pointerStart = null;
+    let holdTimer = null;
+    let suppressClick = false;
+
+    readerEl.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      pointerStart = { x: e.clientX, y: e.clientY, t: Date.now() };
+      suppressClick = false;
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(() => {
+        setBoost(true);
+        if (boostRate) suppressClick = true;
+      }, HOLD_MS);
+    });
+
+    readerEl.addEventListener("pointermove", (e) => {
+      if (!pointerStart) return;
+      if (Math.hypot(e.clientX - pointerStart.x, e.clientY - pointerStart.y) > TAP_SLOP) {
+        clearTimeout(holdTimer);   // a drag is a swipe or a scroll, not a hold
+      }
+    });
+
+    const endPointer = (e) => {
+      clearTimeout(holdTimer);
+      if (boostRate) { setBoost(false); suppressClick = true; }
+      if (!pointerStart) return;
+      const dx = e.clientX - pointerStart.x;
+      const dy = e.clientY - pointerStart.y;
+      pointerStart = null;
+      if (playbackState === "idle") return;
+      if (Math.abs(dx) > SWIPE_MIN && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        // Swipe left = forward, matching the direction the text would move.
+        stepSentence(dx < 0 ? 1 : -1);
+        suppressClick = true;
+      } else if (dy > SWIPE_MIN * 1.6 && Math.abs(dy) > Math.abs(dx) * 1.5 &&
+                 document.body.classList.contains("immersive") && readerEl.scrollTop <= 0) {
+        toggleImmersive(false);    // swipe down out of full screen, from the top
+        suppressClick = true;
+      }
+    };
+    readerEl.addEventListener("pointerup", endPointer);
+    readerEl.addEventListener("pointercancel", () => {
+      clearTimeout(holdTimer);
+      setBoost(false);
+      pointerStart = null;
+    });
+
     fontDown.addEventListener("click", () => nudgeReadScale(-0.1));
     fontUp.addEventListener("click", () => nudgeReadScale(0.1));
     immersiveButton.addEventListener("click", () => toggleImmersive());
     // Tapping the reader's margin (not a sentence) pauses — on a phone the
     // reading pane is most of the screen and the play button is a small target.
     readerEl.addEventListener("click", (e) => {
+      if (suppressClick) { suppressClick = false; return; }
       if (e.target === readerEl && playbackState !== "idle") togglePlayPause();
     });
 
@@ -2361,12 +2573,7 @@
     // listening spot (mapped by characters, since the text length changes).
     trimExtras.addEventListener("change", () => {
       savePrefs();
-      if (!rawArticle) { reReadIfLoaded(); return; }
-      const consumed = chunks.slice(0, chunkIndex).reduce((n, c) => n + c.length + 1, 0) + chunkCharOffset;
-      const before = textArea.value.length || 1;
-      const text = cleanArticle(rawArticle, articleTitle);
-      textArea.value = text;
-      readText(text, 0, chunks.length ? Math.floor((consumed / before) * text.length) : null);
+      if (rawArticle) recleanInPlace(); else reReadIfLoaded();
     });
     // Persist the access key locally; never leaves this browser except to the Worker.
     cfKey.addEventListener("change", () => {

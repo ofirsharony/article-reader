@@ -667,19 +667,72 @@
       /^we use cookies\b.*$/i,
       /^(?:accept(?: all)?(?: cookies)?|reject all|manage (?:cookies|preferences)|cookie settings)$/i,
       /^(?:\d+\s+)+(?:next|previous|»)?$/i,     // pagination strips: "1 2 3 Next"
-      /^@[\w.]+$/,                              // a bare social handle
+      /^@[\w.]+$/i,                             // a bare social handle
+      // Player / consent / caption chrome seen on real pages (BBC, NPR, Verge,
+      // Ars, TechCrunch, Wikipedia).
+      /^(?:on|off|enabled|disabled|enableddisabled|customize|text settings|close modal|back to top)$/i,
+      /^(?:hide|toggle) caption$/i,
+      /^accessibility links?$/i,
+      /^keyboard shortcuts\b.*$/i,
+      /^press shift question mark\b.*$/i,
+      /^(?:play|listen) live(?: radio)?$/i,
+      /^view image in fullscreen$/i,
+      /^(?:privacy center|your privacy choices|privacy preferences|tracking technologies)$/i,
+      /^do not sell(?: or share)?\b.*$/i,
+      /^from wikipedia, the free encyclopedia$/i,
+      /^not to be confused with\b.*$/i,          // Wikipedia hatnote
+      /^see also:\s*\S.*$/i,                     // Wikipedia inline cross-reference
+      /^\([a-z]{2}(?:,\s*[a-z]{2})*\)$/i,        // editor initials, e.g. "(mb, yk)"
+      /^(?:loading|error loading) the next article$/i,
+      /^a flourish data visualization$/i,
+      /^(?:learn more|minimize to nav|story text|start reading the article|about the author)$/i,
+      /^size\b.*\bwidth\b.*\blinks\b.*$/i,       // Ars's font-size widget, one glued line
+      /^(?:report|what's a) billboard\??$/i,
+      // Membership/subscription pitch boxes, which sites inject mid-article
+      // (the Guardian's sits between paragraphs, not at the end).
+      /^support\s+(?:\$|\d)/i,
+      /^(?:unlock all-access|far fewer asks|ad-free reading|unlimited access to|regular dispatches|cancel anytime)\b.*$/i,
+      /^\d+\s*percent off$/i,
     ];
 
     // Junk lines that start with an innocent word, so they're only trusted when
     // the line is short and unpunctuated — i.e. a button label, not a sentence.
+    // No trailing \b: real pages glue labels together ("SubscribeSign In").
     const JUNK_SHORT_RE = [
-      /^share\b/i, /^copy (?:link|the link)\b/i, /^gift (?:this )?article\b/i,
-      /^(?:save|print|email|text|tweet|post|pin) (?:this|article|story)?\b/i,
-      /^(?:follow|connect with) (?:us|me|the author)\b/i,
-      /^(?:sign up|subscribe|get (?:our )?newsletter|enter your email|join .* newsletter)\b/i,
+      /^share/i, /^copy (?:link|the link)/i, /^gift (?:this )?article/i,
+      /^(?:save|print|email|text|tweet|post|pin) (?:this|article|story)?/i,
+      /^(?:follow|connect with) (?:us|me|the author)/i,
+      /^(?:sign|log) ?(?:in|up)/i, /^create account/i,
+      /^subscribe/i, /^get (?:our )?newsletter/i, /^enter your email/i, /^join .* newsletter/i,
+      /^already (?:have|a)\b/i,                  // "Already a subscriber? Sign in"
       /^(?:photos?|photographs?|images?|illustrations?|credits?|captions?)\s*[:—–-]/i,
-      /^(?:leave|post) a comment\b/i, /^sign in to comment\b/i,
+      /^(?:photo|image|illustration|video|photograph)s?\s+(?:by|courtesy)\b/i,
+      /^(?:leave|post) a comment/i, /^sign in to comment/i,
+      /^most (?:popular|read|viewed)$/i,
+      /^start (?:your|a) (?:trial|free trial)/i,
+      /^(?:skip|jump) to/i,
     ];
+
+    // Photo/wire credit lines and captions ending in a credit. Never terminally
+    // punctuated, so a sentence like "..., Reuters reported." is untouched.
+    const CREDIT_RE = /\b(?:getty images|ap photo|\/\s*ap|reuters|afp|shutterstock|bloomberg|epa|pa media|associated press)\b[^.!?]{0,40}$/i;
+
+    // Bibliographic citations. Long and terminally punctuated, so they read as
+    // prose to every other rule here, but nobody wants a reference list spoken
+    // aloud. Each pattern needs a citation-only token, never bare prose shape.
+    const CITATION_RE = [
+      /^[↑^]\s/,                                          // Wikipedia back-links
+      /\b(?:doi:|ISBN\b|arXiv:|PMID\b|PMC\d|S2CID\b|Bibcode:|ISSN\b)/i,
+      /^[^.!?]{0,90}\(\d{4}\)\.\s*["“]/,                  // Author, A. (2024). "Title"
+      /^[^.!?]{0,90}\(\d{4}-\d{2}-\d{2}\)\.\s*["“]/,
+      /\bRetrieved\s+(?:\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},\s*\d{4}|\d{4}-\d{2}-\d{2})/i,
+    ];
+
+    // Cookie/consent modals arrive as real paragraphs, so shape alone can't
+    // catch them; two independent signals must line up, and only near the top
+    // of the page, so an article *about* cookie tracking survives.
+    const CONSENT_TOPIC_RE = /\b(?:cookies?|tracking technolog\w+|consent (?:manager|preferences)|gdpr)\b/i;
+    const CONSENT_UI_RE = /\b(?:opt[- ]out|third[- ]part\w+|your browser|this website|these cookies|preferences|consent|enable core|seamless user experience)\b/i;
 
     // Head-zone patterns: datelines, bylines and section kickers.
     const MONTHS = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
@@ -687,13 +740,20 @@
       /^(?:published|posted|updated|last updated|first published|revised)\b.*$/i,
       new RegExp(`^(?:${MONTHS})\\s+\\d{1,2},?\\s*\\d{0,4}$`, "i"),
       new RegExp(`^\\d{1,2}\\s+(?:${MONTHS})\\.?,?\\s*\\d{0,4}$`, "i"),
-      /^\d{4}-\d{2}-\d{2}\b.*$/,
-      /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,
-      /^\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?(?:\s+[A-Z]{2,4})?\b.*$/i,   // "3:14 PM EDT ..."
-      // "By Jane Doe and Sam Ray" — case-sensitive on the name so a sentence
-      // starting "by the time..." is not mistaken for a byline.
-      /^(?:By|BY|by)\s+[A-Z][\w.'’-]+(?:\s+(?:and\s+)?[A-Z][\w.'’-]+){0,4}$/,
+      /^\d{4}-\d{2}-\d{2}\b.*$/i,
+      /^\d{1,2}\/\d{1,2}\/\d{2,4}$/i,
+      /^\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?(?:\s+[a-z]{2,4})?\b.*$/i,   // "3:14 PM EDT ..."
+      // "By Jane Doe and Sam Ray". Case-insensitive like everything else here;
+      // what keeps prose out is the full-line anchor plus the word cap — a
+      // sentence starting "by the time..." runs far past both.
+      /^by\s+[\w.'’-]+(?:\s+(?:and\s+)?[\w.'’-]+){0,4}$/i,
+      // Bylines glued to a timestamp, e.g. "by Jess WeatherbedJul 31, 2026".
+      // Unpunctuated only, so a standfirst like "By all accounts, ..." survives.
+      /^by\s+[^.!?]{2,80}$/i,
       /^(?:words|reported|written|photographs?|edited|illustrated)\s+by\b.*$/i,
+      // "Sarah Rainsford,Southern and Eastern Europe correspondent" — a name
+      // glued to a job title, which is a byline in every newsroom's markup.
+      /^[^.!?]{0,80}\b(?:correspondent|reporter|editor|columnist|commentator|analyst|contributor|staff writer|news writer)s?$/i,
       /^(?:opinion|analysis|commentary|editorial|newsletter|exclusive|feature|interview|review|guest post|op-ed)$/i,
     ];
 
@@ -707,14 +767,59 @@
       /^(?:comments?|discussion|join the conversation)$/i,
       /^this (?:article|story|post) (?:was|first) (?:originally )?(?:published|appeared)\b.*$/i,
       /^(?:support our journalism|become a member|already a subscriber)\b.*$/i,
-      // Author bio: "Jane Doe is a reporter covering X for Y."
-      /^[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+){1,3}\s+is\s+(?:an?|the)\s+.{0,80}$/,
+      /^continue reading with\b.*$/i,             // paywall pitch
+      /^(?:loading|error loading) the next article$/i,
+      /^do not sell(?: or share)?\b.*$/i,
+      /^support (?:mission-driven|independent|local|public|our) \w+/i,
+      /^most (?:viewed|popular|read)\b.*$/i,
+      /^read the full article\b.*$/i,
+      /^explore more on$/i,
+      // A bare date line at the foot of the page heads a "more stories" list.
+      new RegExp(`^(?:${MONTHS})\\.?\\s+\\d{1,2}$`, "i"),
     ];
+
+    // Unambiguous end-of-article section headings — no article prose is a line
+    // reading just "References". Strong enough to cut from further up the page
+    // than the other markers (a Wikipedia citation list is half the document).
+    const STRONG_TAIL_RE = [
+      /^(?:references|external links|bibliography|notes|footnotes|further reading|citations|sources)$/i,
+      /^for further actions\b.*$/i,               // dev.to's end-of-post block
+      /^(?:top comments?|add to the discussion)\b.*$/i,
+      /^(?:prev|previous|next) story$/i,
+      // The closing byline block: a name glued to a job title, then the bio.
+      /^[^.!?]{0,80}\b(?:correspondent|reporter|editor|columnist|commentator|analyst|contributor|staff writer|news writer|science editor)s?$/i,
+      // Author bio, third person ("Jane Doe is a reporter covering X") or first
+      // ("I'm a teacher and developer with ...").
+      /^[\w.'’-]+(?:\s+[\w.'’-]+){1,3}\s+is\s+(?:an?|the)\s+.{0,160}$/i,
+      /^i'?m\s+(?:an?|the)\s+.{0,160}$/i,
+    ];
+
+    // Words that a person's name doesn't contain — used to tell a byline
+    // ("Kirsten Korosec") from a Title-Cased headline ("The Future Of Work").
+    const NAME_STOPWORDS = /\b(?:the|a|an|of|in|on|for|and|to|with|from|at|by|is|are|was|were|how|why|what|when|your|our|my)\b/i;
 
     function isJunkLine(line) {
       if (JUNK_EXACT_RE.some(re => re.test(line))) return true;
+      if (line.length <= 300 && CREDIT_RE.test(line)) return true;
+      if (CITATION_RE.some(re => re.test(line))) return true;
+      if (line.length <= 48 && /\bpromoted$/i.test(line)) return true;   // ad slot label
       const buttonish = line.length <= 48 && !/[.!?]$/.test(line);
       return buttonish && JUNK_SHORT_RE.some(re => re.test(line));
+    }
+
+    // A UI label rather than a sentence: short, unpunctuated, a handful of
+    // words. On its own that also describes a heading, which is why only *runs*
+    // of these are dropped (see stripBoilerplate) — nav bars, tag strips and
+    // player controls arrive in blocks of four or more, headings never do.
+    // `loose` widens the definition for the top of the page, where promo grids
+    // and course lists run longer than a nav label ("Live UX Training — Smart
+    // Interface Design Patterns"). Only used above the article, so a list of
+    // real bullet points further down keeps the tighter limits.
+    function isLabelLine(line, loose) {
+      if (line.length > (loose ? 75 : 45)) return false;
+      if (/[.!?…:;,]$/.test(line)) return false;
+      if (/^(?:[-*•‣–—>]|\d+[.)])\s/.test(line)) return false;   // list item
+      return line.split(/\s+/).length <= (loose ? 10 : 6);
     }
 
     // How boilerplate-ish a head-zone line looks. Scored rather than matched
@@ -726,59 +831,138 @@
       if (line.length < 60 && !/[.!?]$/.test(line)) score += 1;
       if (/\b(?:19|20)\d{2}\b/.test(line) && line.length <= 40) score += 1;
       if (line.length <= 40 && line === line.toUpperCase() && /[A-Z]/.test(line)) score += 1;
+      // A name-shaped line is a byline without the "By": 2-4 capitalised words,
+      // no stop words (which is what keeps "The Future Of Work" out).
+      if (line.length <= 32 && !NAME_STOPWORDS.test(line) &&
+          /^[^\s]+(?:\s+[^\s]+){1,3}$/.test(line) &&
+          line.split(/\s+/).every(w => /^[A-Z’'][\w.’'-]*$/.test(w))) score += 2;
+      // A one- or two-word head line is a section kicker ("AI", "World News"),
+      // never a headline.
+      if (line.length <= 14 && line.split(/\s+/).length <= 2) score += 1;
       if (afterDropped) score += 1;                      // boilerplate arrives in clusters
       if (/\b(?:said|says|is|are|was|were|has|have|will|would|can|could|the)\b/i.test(line)) score -= 2;
       if (line.length > 120) score -= 3;
       return score;
     }
 
-    // Drop the pre-article furniture and cut the post-article furniture.
+    // Drop the pre-article furniture and cut the post-article furniture, in
+    // four passes. Order matters: junk and nav go first so the head zone is
+    // located in what's left — real pages open with consent paragraphs and nav
+    // blobs long enough to look like the first prose paragraph otherwise.
     function stripBoilerplate(lines, title = "") {
       const dropped = [];
-      // The head zone ends at the first real prose paragraph: long, and ending
-      // in a sentence. Everything before that is headline/dateline/byline land.
-      const firstProse = lines.findIndex(l => l.length > 180 && /[.!?…"'’”]$/.test(l));
+      let kept = cutTail(lines, dropped);
+      let afterAuthorBox = false;
+      kept = kept.filter((l, i) => {
+        const consent = i < 25 && CONSENT_TOPIC_RE.test(l) && CONSENT_UI_RE.test(l);
+        // An author box ("About the author" + one bio paragraph) can sit above
+        // the article, not just below it, so the bio is matched by position
+        // rather than by the tail rules.
+        // The same bio also appears directly under the headline on some sites
+        // (The Verge), where it precedes the article's first paragraph.
+        const bioShaped = /^[\w.'’-]+(?:\s+[\w.'’-]+){0,3}\s+is\s+(?:an?|the)\s/i.test(l);
+        const bio = bioShaped && (afterAuthorBox || i < 8);
+        afterAuthorBox = /^about the author/i.test(l);
+        if (!isJunkLine(l) && !consent && !bio) return true;
+        dropped.push(l);
+        return false;
+      });
+
+      // Navigation, tag strips, player controls, promo grids: blocks of four or
+      // more consecutive label lines. This is the single biggest source of junk
+      // in real dumps (a BBC page arrives with ~100 nav labels), and runs are
+      // what separate it from a real heading, which always sits alone between
+      // paragraphs. Skipped entirely if such runs are most of the page — that
+      // means a link roundup, where the "nav" is the content.
+      const runs = [];
+      const label = (i) => i < kept.length && isLabelLine(kept[i], i < 15);
+      for (let i = 0; i < kept.length; i++) {
+        if (!label(i)) continue;
+        let j = i;
+        while (label(j + 1)) j++;
+        if (j - i + 1 >= 4) runs.push([i, j]);
+        i = j;
+      }
+      const runChars = runs.reduce((n, [a, b]) =>
+        n + kept.slice(a, b + 1).reduce((m, l) => m + l.length, 0), 0);
+      const allChars = kept.reduce((n, l) => n + l.length, 0);
+      if (runs.length && runChars < allChars * 0.5) {
+        const inRun = new Set();
+        runs.forEach(([a, b]) => { for (let k = a; k <= b; k++) inRun.add(k); });
+        kept = kept.filter((l, i) => {
+          if (!inRun.has(i)) return true;
+          dropped.push(l);
+          return false;
+        });
+      }
+
+      // Head zone: everything before the first real prose paragraph (long, and
+      // ending in a sentence) is headline/dateline/byline land. Capped at 8
+      // lines so an article that opens with short paragraphs keeps them.
+      const firstProse = kept.findIndex(isProseLine);
       const headEnd = Math.min(firstProse === -1 ? 6 : firstProse, 8);
       const norm = (s) => s.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
       const titleNorm = norm(title);
-
-      let kept = [];
       let lastDropped = false;
-      lines.forEach((line, i) => {
-        const inHead = i < headEnd;
-        // The headline usually repeats the <title>; we already show it above.
-        const dupTitle = inHead && titleNorm && norm(line) === titleNorm;
-        const drop = isJunkLine(line) || dupTitle ||
-          (inHead && headScore(line, lastDropped) >= 3);
+      kept = kept.filter((line, i) => {
+        if (i >= headEnd) return true;
+        // The headline often repeats the page title, which we already track.
+        const dupTitle = titleNorm && norm(line) === titleNorm;
+        const drop = dupTitle || headScore(line, lastDropped) >= 3;
         lastDropped = drop;
-        if (drop) dropped.push(line); else kept.push(line);
+        if (drop) dropped.push(line);
+        return !drop;
       });
-
-      // Tail: cut from the first marker in the closing stretch of the article.
-      // The guard is character-based, not line-based — the cut only stands if
-      // most of the article's text is still above it, so a mid-article
-      // "Read more" link box can't take the second half with it.
-      const totalChars = kept.reduce((n, l) => n + l.length, 0);
-      let charsAbove = 0;
-      const tailStart = Math.max(1, kept.length - 15);
-      for (let i = 0; i < kept.length; i++) {
-        // A cut marker is a label or a link line, never a full paragraph — the
-        // length cap is what keeps prose like "Related work continues at..."
-        // from ending the article.
-        if (i >= tailStart && kept[i].length <= 120 &&
-            TAIL_CUT_RE.some(re => re.test(kept[i])) &&
-            charsAbove >= totalChars * 0.6) {
-          dropped.push(...kept.slice(i));
-          kept = kept.slice(0, i);
-          break;
-        }
-        charsAbove += kept[i].length;
-      }
 
       // Auditable: every drop is visible in the console, so a bad pattern can be
       // spotted without guessing.
       if (dropped.length) console.debug("[article-reader] trimmed extras:", dropped);
       return kept;
+    }
+
+    // Cut from the first tail marker in the closing stretch of the page. Runs
+    // before anything else is dropped, because the marker is often junk in its
+    // own right ("Most read", "Related") — remove it first and the anchor for
+    // the cut is gone. The guard is character-based, not line-based: the cut
+    // only stands if most of the text is still above it, so a mid-article
+    // "Read more" box can't take the second half of the article with it.
+    function cutTail(lines, dropped) {
+      const totalChars = lines.reduce((n, l) => n + l.length, 0);
+      const tailStart = Math.max(1, lines.length - 60);
+      let charsAbove = 0;
+      for (let i = 0; i < lines.length; i++) {
+        // A cut marker is a label or a link line, never a full paragraph — the
+        // length cap is what keeps prose like "Related work continues at..."
+        // from ending the article.
+        const strong = STRONG_TAIL_RE.some(re => re.test(lines[i]));
+        const matches = strong || TAIL_CUT_RE.some(re => re.test(lines[i]));
+        if (matches && lines[i].length <= 160 &&
+            (strong || i >= tailStart) &&
+            charsAbove >= totalChars * (strong ? 0.4 : 0.6) &&
+            !proseFollows(lines, i)) {
+          dropped.push(...lines.slice(i));
+          return lines.slice(0, i);
+        }
+        charsAbove += lines[i].length;
+      }
+      return lines;
+    }
+
+    // The last guard on a tail cut: whatever follows the marker must not read
+    // like article prose. Link lists, tag strips and citation lists are short
+    // lines; body paragraphs are long ones that end in a sentence.
+    function proseFollows(lines, i) {
+      const rest = lines.slice(i + 1);
+      if (!rest.length) return false;
+      return rest.filter(isProseLine).length / rest.length >= 0.2;
+    }
+
+    // Long and terminally punctuated — but a citation is both of those and is
+    // not prose, which is exactly what a reference list at the foot of a
+    // Wikipedia article is made of.
+    function isProseLine(line) {
+      return line.length > 180 && /[.!?…"'’”]$/.test(line) &&
+        !CITATION_RE.some(re => re.test(line));
     }
 
     // A line that reads like a section title rather than prose. Jina's text
@@ -804,7 +988,9 @@
         // declarations) so code blocks and JSON are left untouched.
         .replace(/(?:[^{}\n]*\{[^{}]*\})+/g, m =>
           /:host|white-space:|will-change:|display:inline-|line-height:|--[\w-]+:/.test(m) ? "" : m)
-        .replace(/\b(?:Jump|Skip) to (?:main )?(?:content|navigation|search)\b/gi, "")
+        // No leading \b: pages glue skip links together, e.g.
+        // "Skip to main contentSkip to navigation".
+        .replace(/(?:Jump|Skip) to (?:main |list of )?(?:content|navigation|search|all articles|all topics)/gi, "")
         // Standalone ad/label lines (not the word mid-sentence).
         .replace(/^[ \t]*(?:advertisement|sponsored(?: content)?|promoted content)[ \t]*$/gim, "")
         .replace(/\[\d+\](?:\[\d+\])*/g, "")  // [12] or [12][13] reference marks

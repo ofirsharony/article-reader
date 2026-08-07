@@ -224,7 +224,12 @@
       display: none; gap: 6px; justify-content: flex-end; margin-top: 12px;
     }
     #readerBar.active { display: flex; }
-    #readerBar button { width: auto; padding: 4px 10px; font-size: 13px; }
+    /* Direct children only: the speed cluster is moved in here in full-screen
+       mode (see toggleImmersive) and keeps its own .nudge sizing. */
+    #readerBar > button { width: auto; padding: 4px 10px; font-size: 13px; }
+    #readerBar > #immersiveButton { padding: 6px 13px; font-size: 18px; }
+    /* Speed + time left, shown only in full-screen mode. */
+    #fsMeta { display: none; }
     /* Reading view: shows the article split into chunks, highlighting the one
        currently being spoken and auto-scrolling it into view. `--read-scale` is
        the user's text-size choice, persisted with the other prefs. */
@@ -246,7 +251,8 @@
     body.immersive #reader {
       position: fixed; inset: 0 0 92px; z-index: 50;
       max-height: none; margin: 0; border-radius: 0;
-      padding: 24px max(16px, calc((100vw - 720px) / 2));
+      /* Top padding clears the docked toolbar so the first chunk isn't under it. */
+      padding: 64px max(16px, calc((100vw - 720px) / 2)) 24px;
       background: Canvas;
     }
     body.immersive .controls {
@@ -264,8 +270,19 @@
     }
     #boostPill.active { display: block; }
     body.immersive #boostPill { bottom: 104px; }
+    /* Full-screen toolbar: speed on the left, time left in the middle, exit on
+       the right. Text size lives in the settings pane — full screen is for
+       listening, and the reader is already sized by then. */
     body.immersive #readerBar {
-      position: fixed; top: 10px; right: 12px; z-index: 52; margin: 0;
+      position: fixed; top: 10px; left: 12px; right: 12px; z-index: 52; margin: 0;
+      justify-content: space-between; align-items: center; gap: 12px;
+      padding: 6px 10px; border-radius: 12px;
+      background: color-mix(in srgb, CanvasText 6%, Canvas);
+    }
+    body.immersive #readerBar .speed { flex: 0 1 240px; min-width: 150px; }
+    body.immersive #fontDown, body.immersive #fontUp { display: none; }
+    body.immersive #fsMeta {
+      display: block; font-size: 13px; opacity: 0.7; white-space: nowrap;
     }
     .chunk {
       display: block;
@@ -399,6 +416,7 @@
     <div id="readerBar">
       <button type="button" id="fontDown" class="nudge" aria-label="Smaller text" title="Smaller text">A&minus;</button>
       <button type="button" id="fontUp" class="nudge" aria-label="Larger text" title="Larger text">A+</button>
+      <span id="fsMeta" aria-hidden="true"></span>
       <button type="button" id="immersiveButton" class="nudge" aria-label="Full-screen reading mode" title="Full-screen reading mode">&#10530;</button>
     </div>
 
@@ -432,6 +450,11 @@
     const fontDown = document.getElementById("fontDown");
     const fontUp = document.getElementById("fontUp");
     const immersiveButton = document.getElementById("immersiveButton");
+    const fsMeta = document.getElementById("fsMeta");
+    // The one speed cluster, relocated into the full-screen toolbar rather than
+    // duplicated there — one slider means no two-way syncing and no extra listeners.
+    const speedBox = document.querySelector(".speed");
+    const speedHome = speedBox.parentElement;
     const boostPill = document.getElementById("boostPill");
     const statusEl = document.getElementById("status");
     const readerEl = document.getElementById("reader");
@@ -540,6 +563,7 @@
     let trimmedLines = [];        // what the last clean removed, listed under the title
     let cleanedSource = "";       // cleanArticle()'s last output, so readText() doesn't re-trim it
     let readScale = 1;            // reading-view text size multiplier
+    let etaLabel = "";            // last rendered "time left", reused by the full-screen readout
     let boostRate = 0;            // press-and-hold speed multiplier (0 = off)
     let trimHost = "";            // hostname whose trim corrections apply ("" = pasted text)
     let articleTitle = "Article"; // for the lock-screen / media metadata
@@ -1582,6 +1606,10 @@
       document.body.classList.toggle("immersive", on);
       immersiveButton.setAttribute("aria-pressed", String(on));
       immersiveButton.title = on ? "Exit full-screen reading mode" : "Full-screen reading mode";
+      immersiveButton.innerHTML = on ? "&#10529;" : "&#10530;";   // ⤡ collapse / ⤢ expand
+      if (on) readerBar.insertBefore(speedBox, readerBar.firstChild);
+      else speedHome.appendChild(speedBox);
+      updateFsMeta();
       if (on && chunkEls[chunkIndex]) chunkEls[chunkIndex].scrollIntoView({ block: "center" });
     }
 
@@ -1593,14 +1621,26 @@
 
     // Rough estimate of time left, based on characters remaining and speed.
     function updateEta() {
-      if (!chunks.length || playbackState === "idle") { etaEl.textContent = ""; return; }
-      let remaining = 0;
-      for (let i = chunkIndex; i < chunks.length; i++) remaining += chunks[i].length;
-      const rate = Number(rateInput.value) || 1;
-      const secs = remaining / (CHARS_PER_SEC * rate);
-      etaEl.textContent = secs >= 90
-        ? `~${Math.round(secs / 60)} min left`
-        : `~${Math.max(1, Math.round(secs))} sec left`;
+      if (!chunks.length || playbackState === "idle") {
+        etaLabel = "";
+      } else {
+        let remaining = 0;
+        for (let i = chunkIndex; i < chunks.length; i++) remaining += chunks[i].length;
+        const rate = Number(rateInput.value) || 1;
+        const secs = remaining / (CHARS_PER_SEC * rate);
+        etaLabel = secs >= 90
+          ? `~${Math.round(secs / 60)} min left`
+          : `~${Math.max(1, Math.round(secs))} sec left`;
+      }
+      etaEl.textContent = etaLabel;
+      updateFsMeta();
+    }
+
+    // The full-screen toolbar has no room for the "Speed: 1.15x" label the
+    // settings pane carries, so speed and time left share one compact readout.
+    function updateFsMeta() {
+      const rate = (Number(rateInput.value) || 1).toFixed(2) + "×";
+      fsMeta.textContent = etaLabel ? `${rate} · ${etaLabel}` : rate;
     }
 
     // --- Per-word highlighting (browser engine) ----------------------------
@@ -2284,6 +2324,7 @@
       cfPlayers.forEach((el) => { el.playbackRate = liveRate(); });
       rateDown.disabled = rate <= Number(rateInput.min);
       rateUp.disabled = rate >= Number(rateInput.max);
+      updateFsMeta();
     }
 
     // The rate actually applied to audio right now: the slider's, unless a
@@ -2390,16 +2431,18 @@
 
     // Keyboard shortcuts: Space/K play-pause, arrows skip. Ignored while typing.
     document.addEventListener("keydown", (e) => {
-      const t = e.target;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
-                t.tagName === "SELECT" || t.tagName === "BUTTON" ||
-                t.isContentEditable)) return;
-      // Escape leaves full-screen reading mode even when nothing is playing.
+      // Escape leaves full-screen reading mode even when nothing is playing —
+      // and even from a focused control, since the full-screen toolbar's speed
+      // buttons and slider are the things most likely to hold focus there.
       if (e.key === "Escape" && document.body.classList.contains("immersive")) {
         e.preventDefault();
         toggleImmersive(false);
         return;
       }
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
+                t.tagName === "SELECT" || t.tagName === "BUTTON" ||
+                t.isContentEditable)) return;
       if (playbackState === "idle") return;
       if (e.key === " " || e.key === "k") {
         e.preventDefault();

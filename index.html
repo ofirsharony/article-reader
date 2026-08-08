@@ -249,18 +249,22 @@
        playback buttons. */
     body.immersive { overflow: hidden; }
     body.immersive #reader {
-      position: fixed; inset: 0 0 92px; z-index: 50;
+      position: fixed; inset: 0 0 68px; z-index: 50;   /* clears the docked controls */
       max-height: none; margin: 0; border-radius: 0;
       /* Top padding clears the docked toolbar so the first chunk isn't under it. */
       padding: 64px max(16px, calc((100vw - 720px) / 2)) 24px;
       background: Canvas;
     }
+    /* Slimmer than the settings-pane version so the docked bar roughly matches
+       the toolbar at the top; the buttons stay 44px tall for the thumb. */
     body.immersive .controls {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 51;
-      margin: 0; padding: 12px max(16px, calc((100vw - 720px) / 2));
+      margin: 0; padding: 8px max(16px, calc((100vw - 720px) / 2));
       background: color-mix(in srgb, CanvasText 5%, Canvas);
       border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
     }
+    /* The global button margin-top is dead weight in a docked bar. */
+    body.immersive .controls button.toggle { font-size: 20px; padding: 11px; margin: 0; }
     /* Shown while a press-and-hold speed boost is active. */
     #boostPill {
       position: fixed; z-index: 60; left: 50%; transform: translateX(-50%);
@@ -269,7 +273,7 @@
       display: none; pointer-events: none;
     }
     #boostPill.active { display: block; }
-    body.immersive #boostPill { bottom: 104px; }
+    body.immersive #boostPill { bottom: 80px; }   /* just above the docked controls */
     /* Full-screen toolbar: speed on the left, time left in the middle, exit on
        the right. Text size lives in the settings pane — full screen is for
        listening, and the reader is already sized by then. */

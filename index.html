@@ -417,7 +417,7 @@
       <button type="button" id="fontDown" class="nudge" aria-label="Smaller text" title="Smaller text">A&minus;</button>
       <button type="button" id="fontUp" class="nudge" aria-label="Larger text" title="Larger text">A+</button>
       <span id="fsMeta" aria-hidden="true"></span>
-      <button type="button" id="immersiveButton" class="nudge" aria-label="Full-screen reading mode" title="Full-screen reading mode">&#10530;</button>
+      <button type="button" id="immersiveButton" class="nudge" aria-label="Full-screen reading mode" title="Full-screen reading mode">&#9974;</button>
     </div>
 
     <div id="reader" title="Tap a sentence to read from there, or the margin to pause. Swipe for the next sentence, hold to speed up."></div>
@@ -1606,7 +1606,7 @@
       document.body.classList.toggle("immersive", on);
       immersiveButton.setAttribute("aria-pressed", String(on));
       immersiveButton.title = on ? "Exit full-screen reading mode" : "Full-screen reading mode";
-      immersiveButton.innerHTML = on ? "&#10529;" : "&#10530;";   // ⤡ collapse / ⤢ expand
+      immersiveButton.innerHTML = on ? "&#10005;" : "&#9974;";    // ✕ close / ⛶ full screen
       if (on) readerBar.insertBefore(speedBox, readerBar.firstChild);
       else speedHome.appendChild(speedBox);
       updateFsMeta();

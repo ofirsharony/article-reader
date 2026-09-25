@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>No-Card TTS Providers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #f5f7f7;
+    --surface: #ffffff;
+    --ink: #1b2628;
+    --muted: #5b6b6e;
+    --line: #d9e1e2;
+    --accent: #1f6f78;
+    --good-bg: #dff1e6; --good-fg: #1d6b3c;
+    --weak-bg: #fbeed3; --weak-fg: #8a5a00;
+    --unk-bg: #e6eaf2;  --unk-fg: #3f4f73;
+    --poor-bg: #f8e0dd; --poor-fg: #9b2c21;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #121a1b; --surface: #182224; --ink: #e3ebec; --muted: #93a4a7; --line: #2a3739; --accent: #6cc3cc;
+      --good-bg: #173524; --good-fg: #8fdcaa;
+      --weak-bg: #3a2c10; --weak-fg: #f0c26a;
+      --unk-bg: #222b40;  --unk-fg: #a9b8e0;
+      --poor-bg: #3d1c19; --poor-fg: #f2a097;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #121a1b; --surface: #182224; --ink: #e3ebec; --muted: #93a4a7; --line: #2a3739; --accent: #6cc3cc;
+    --good-bg: #173524; --good-fg: #8fdcaa;
+    --weak-bg: #3a2c10; --weak-fg: #f0c26a;
+    --unk-bg: #222b40;  --unk-fg: #a9b8e0;
+    --poor-bg: #3d1c19; --poor-fg: #f2a097;
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.55; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 40px 56px; display: grid; gap: 28px; }
+  header { display: grid; gap: 8px; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  h1 { margin: 0; font-size: 28px; font-weight: 600; text-wrap: balance; }
+  .lede { margin: 0; color: var(--muted); max-width: 68ch; }
+  .table-box { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; min-width: 1040px; }
+  th, td { text-align: left; vertical-align: top; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: 0; }
+  th { font-family: var(--mono); font-size: 11.5px; font-weight: 500; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); background: var(--bg); }
+  td.name { font-weight: 600; white-space: nowrap; }
+  td.name small { display: block; font-weight: 400; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  td.quality b { font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11.5px; font-weight: 500; padding: 2px 8px; border-radius: 999px; margin-bottom: 6px; }
+  .good { background: var(--good-bg); color: var(--good-fg); }
+  .weak { background: var(--weak-bg); color: var(--weak-fg); }
+  .unk  { background: var(--unk-bg);  color: var(--unk-fg); }
+  .poor { background: var(--poor-bg); color: var(--poor-fg); }
+  section { display: grid; gap: 10px; }
+  h2 { margin: 0; font-size: 17px; font-weight: 600; }
+  ol, ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; max-width: 80ch; }
+  .chain { font-family: var(--mono); font-size: 13px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; white-space: nowrap; }
+  .sources a { color: var(--accent); }
+  .sources li { font-size: 13.5px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Article Reader · premium voice tiers</div>
+    <h1>Text-to-speech providers with no credit card</h1>
+    <p class="lede">Free tiers that could sit behind the Cloudflare Worker as more quota-fallback tiers. "Fit" means how well the provider works with the current setup: a Worker proxy that returns MP3 for chunks of about 400 characters. Researched September 2026. Quality is taken from published comparisons and each provider's reputation. I didn't listen to samples.</p>
+  </header>
+
+  <div class="table-box">
+    <table>
+      <thead>
+        <tr><th>Provider</th><th>Free allowance</th><th>Resets</th><th>Quality</th><th>Fit with the current Worker</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="name">Deepgram direct<small>Aura-1 / Aura-2</small></td>
+          <td class="num">$200 credit on signup, doesn't expire. About 6.7M chars on Aura-2 ($30/1M) or 13M on Aura-1</td>
+          <td>One-time</td>
+          <td class="quality"><b>Good</b> (Aura-2). Clear and steady, a little flat. Built for voice agents, not narration. Aura-1 sounds more synthetic.</td>
+          <td><span class="pill good">Best</span><br>Same Aura voices you already use through Workers AI, so the voice lists stay as they are. Only the endpoint and key change.</td>
+        </tr>
+        <tr>
+          <td class="name">Fish Audio<small>s2.1-pro-free</small></td>
+          <td>No character cap, fair-use throttling only</td>
+          <td>Offer ends Nov 30, 2026</td>
+          <td class="quality"><b>Very high</b>. Close to ElevenLabs on naturalness and expression, and ranks near the top of public TTS leaderboards.</td>
+          <td><span class="pill good">Good</span><br>Returns MP3. The free period ends in about two months. Requests may be used to train their models.</td>
+        </tr>
+        <tr>
+          <td class="name">Cartesia<small>Sonic</small></td>
+          <td class="num">20K chars/month (1 credit = 1 char)</td>
+          <td>Monthly</td>
+          <td class="quality"><b>High</b>. Natural and expressive, with good pacing on long text.</td>
+          <td><span class="pill good">Good</span><br>Fine for personal use. The free plan has no commercial license. It covers about 4 average articles a month.</td>
+        </tr>
+        <tr>
+          <td class="name">Gemini TTS<small>AI Studio key</small></td>
+          <td class="num">Listed as "Free of charge" through Dec 2026, but rate-limited. The one published figure (2.5 Flash TTS) is 15 requests/day, 3 RPM</td>
+          <td>Daily</td>
+          <td class="quality"><b>High</b>. Expressive, and you can steer the style with a prompt ("read calmly"). Pace can drift between requests.</td>
+          <td><span class="pill weak">Weak</span><br>At ~400-char chunks, 15 requests is about 6K chars a day. It returns raw PCM, so the Worker would have to add a WAV header. Latency is several seconds per request.</td>
+        </tr>
+        <tr>
+          <td class="name">Speechify API<small>Simba</small></td>
+          <td class="num">Sources disagree: 50K or 500K chars/month</td>
+          <td>Monthly</td>
+          <td class="quality"><b>Good</b>. Natural narration voices, less expressive than Fish or ElevenLabs.</td>
+          <td><span class="pill unk">Probably fits</span><br>I couldn't confirm the number from their pricing page.</td>
+        </tr>
+        <tr>
+          <td class="name">Mistral Voxtral TTS<small>Experiment plan</small></td>
+          <td>Phone verification, no card</td>
+          <td>—</td>
+          <td class="quality"><b>High</b>, by Mistral's own comparison against ElevenLabs Flash. I haven't seen independent comparisons yet.</td>
+          <td><span class="pill unk">Unconfirmed</span><br>I couldn't verify that TTS is included in the free plan.</td>
+        </tr>
+        <tr>
+          <td class="name">ElevenLabs<small>Free plan</small></td>
+          <td class="num">10K chars/month, attribution required</td>
+          <td>Monthly</td>
+          <td class="quality"><b>Very high</b>. The reference point the other providers compare themselves to.</td>
+          <td><span class="pill poor">Poor</span><br>The free tier blocks traffic it thinks comes from a proxy or VPN ("Unusual activity detected"). Every request would come from Cloudflare's datacenter IPs, so it would probably get flagged.</td>
+        </tr>
+        <tr>
+          <td class="name">Edge TTS<small>unofficial</small></td>
+          <td>No key, no limit</td>
+          <td>—</td>
+          <td class="quality"><b>Good</b>. Microsoft neural voices (Aria, Jenny, Guy). Clean but plainer than the newer models.</td>
+          <td><span class="pill poor">Poor</span><br>Uses the voices from Edge's Read Aloud through a reverse-engineered WebSocket. It could run from the Worker, but Microsoft has broken it more than once, and the terms of use are unclear.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <section>
+    <h2>Suggested fallback order</h2>
+    <div class="chain">Aura-2 (Workers AI) → Fish Audio (until Nov 30) → Deepgram direct → Cartesia → Aura-1 / MeloTTS (Workers AI) → browser voice</div>
+    <p class="lede">Each provider becomes one more tier in the existing <code>quotaFallback()</code> chain, with one more upstream in the Worker and its key stored as a Worker secret.</p>
+  </section>
+
+  <section>
+    <h2>Left out</h2>
+    <ul>
+      <li>Card required: OpenAI, Azure Speech F0, Google Cloud TTS, Amazon Polly, Inworld.</li>
+      <li>No card, but no practical use: Hugging Face ($0.10/month of credit), Groq (no TTS output).</li>
+    </ul>
+  </section>
+
+  <section class="sources">
+    <h2>Sources</h2>
+    <ul>
+      <li><a href="https://deepgram.com/pricing">Deepgram pricing</a> · <a href="https://deepgram.com/learn/aura-text-to-speech-tts-api-voice-ai-agents-launch">Aura launch post</a></li>
+      <li><a href="https://fish.audio/blog/s2-1-pro-free-api/">Fish Audio free API</a> · <a href="https://fish.audio/plan/">Fish Audio plans</a></li>
+      <li><a href="https://cartesia.ai/pricing">Cartesia pricing</a> · <a href="https://texttolab.com/blog/cartesia-pricing">TextToLab: Cartesia pricing</a></li>
+      <li><a href="https://ai.google.dev/gemini-api/docs/pricing">Gemini API pricing</a> · <a href="https://ai.google.dev/gemini-api/docs/rate-limits">Gemini rate limits</a> · <a href="https://discuss.ai.google.dev/t/what-are-the-rpd-rpm-and-tpm-limits-for-gemini-3-1-flash-tts-preview-per-tier/141793">Forum: 3.1 Flash TTS limits</a></li>
+      <li><a href="https://speechify.ai/pricing">Speechify API pricing</a> · <a href="https://casrai.org/guides/speechify-pricing">CASRAI: Speechify pricing</a></li>
+      <li><a href="https://mistral.ai/news/voxtral-tts/">Mistral Voxtral TTS</a> · <a href="https://pricepertoken.com/endpoints/mistral/free">Price Per Token: Mistral free tier</a></li>
+      <li><a href="https://elevenlabs.io/pricing">ElevenLabs pricing</a> · <a href="https://elevenlabs.io/docs/help-center/account/general/what-does-unusual-activity-detected-free-tier-usage-disabled-if-you-are-using-proxy-vpn-you-might-need-to-purchase-a-paid-plan-to-not-trigger-our-abuse-detectors-mean">ElevenLabs: "unusual activity" article</a></li>
+      <li><a href="https://freeapihub.com/blog/best-free-text-to-speech-apis">FreeAPIHub: free TTS APIs (Edge TTS)</a></li>
+      <li><a href="https://inworld.ai/pricing">Inworld pricing</a> · <a href="https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-services-quotas-and-limits">Azure Speech quotas</a> · <a href="https://community.openai.com/t/no-free-tier-for-api-needs-to-add-credit-card-detail-making-learning-difficult/871737">OpenAI: no free tier</a></li>
+    </ul>
+  </section>
+</div>
+</body>
+</html>

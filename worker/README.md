@@ -1,8 +1,9 @@
 # Article Reader TTS Worker
 
 A tiny Cloudflare Worker that proxies the Article Reader page to Cloudflare
-Workers AI text-to-speech (MeloTTS and Deepgram Aura-1), so the static page can
-use premium voices without exposing any Cloudflare API token.
+Workers AI text-to-speech (MeloTTS, Deepgram Aura-1 and Aura-2), so the static
+page can use premium voices without exposing any Cloudflare API token. Two
+optional backup tiers call Cartesia and Deepgram directly with their own keys.
 
 It authenticates to Workers AI via the **AI binding** (no token), and gates
 public access with a shared **access key** you choose.
@@ -10,10 +11,13 @@ public access with a shared **access key** you choose.
 ## What it does
 
 - `POST /` with header `X-Access-Key: <your key>` and JSON
-  `{ "model": "melotts" | "aura-1", "voice": "<aura voice>", "text": "..." }`
+  `{ "model": "melotts" | "aura-1" | "aura-2" | "cartesia" | "deepgram", "voice": "<voice>", "text": "..." }`
 - Returns the spoken text as `audio/mpeg` (MP3).
-- Rejects: wrong/missing key (`401`), unknown model/voice or text over 2000
-  chars (`400`).
+- Rejects: wrong/missing key (`401`), unknown model or text over 2000 chars
+  (`400`). Unknown voices fall back to the model's default voice.
+- Quota or out-of-credit errors return `429`; a backup tier with no key (or a
+  rejected one) returns `503 provider_unavailable`. The page moves to the next
+  tier on both.
 - CORS is pinned to the site origin (`ALLOWED_ORIGIN` in `worker.js`).
 
 ## Deploy (one time, free, no credit card)
@@ -38,6 +42,22 @@ public access with a shared **access key** you choose.
    `index.html` — set the `CF_WORKER_URL` constant.
 5. If your site origin differs from `https://ofirsharony.github.io`, update
    `ALLOWED_ORIGIN` in `worker.js` and redeploy.
+
+## Backup tiers (optional, free, no credit card)
+
+Both are skipped by the page until their key is set.
+
+- **Cartesia** (20K characters/month, resets monthly): sign up at
+  https://play.cartesia.ai, create an API key, then
+  `npx wrangler secret put CARTESIA_API_KEY`.
+- **Deepgram** (one-time $200 credit, no expiry): sign up at
+  https://console.deepgram.com, create an API key, then
+  `npx wrangler secret put DEEPGRAM_API_KEY`.
+
+Setting a secret takes effect without a redeploy, but the code that uses them
+needs one `npx wrangler deploy`. The Cartesia voice ids in `CARTESIA_VOICES`
+came from third-party docs; if Cartesia rejects one, list the real ids with
+`curl -H "Authorization: Bearer $KEY" -H "Cartesia-Version: 2026-08-14" https://api.cartesia.ai/voices`.
 
 ## Notes
 

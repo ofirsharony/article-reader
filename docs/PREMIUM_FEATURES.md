@@ -43,7 +43,7 @@ limited to whatever en-US/en-GB voices the device ships with.
 ## Automatic quota fallback
 
 When the Worker reports that a tier's daily quota or capacity is exhausted, playback degrades automatically
-(Aura-2 → Aura-1 → MeloTTS → free browser voice) and re-chunks by character position so the listening spot survives
+(Aura-2 → Cartesia → Deepgram → Aura-1 → MeloTTS → free browser voice) and re-chunks by character position so the listening spot survives
 the switch. Every new article starts again at the preferred tier since the quota resets daily.
 
 ## Gapless chunk transitions and prefetch

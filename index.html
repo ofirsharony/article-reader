@@ -493,7 +493,7 @@
     const PREFS_VERSION = 3;
     const POS_STORAGE = "ar_positions";      // per-URL resume positions
     const POS_TTL_MS = 7 * 24 * 60 * 60 * 1000;  // forget resume points after 7 days
-    const AUDIO_CACHE_MAX = 40;              // in-memory premium-audio cache cap
+    const AUDIO_CACHE_MAX = 60;              // in-memory premium-audio cache cap (> CF_LOOKAHEAD_MAX)
     const RULES_STORAGE = "ar_trim_rules";   // per-site "keep this line" corrections
     const RULES_SITES_MAX = 40;              // sites remembered, LRU beyond that
     const RULES_PER_SITE_MAX = 50;           // corrections per site
@@ -528,6 +528,14 @@
     let auraPick = "";
     const CHUNK_SIZE = 400;      // both engines; also bounds premium first-audio latency
     const FIRST_CHUNK_SIZE = 160;  // the chunk the listener actually waits for
+    // Premium look-ahead: chunks of audio kept fetched ahead of the playhead, so a screen-off handoff never waits on
+    // the network. Starts at MIN and doubles with chunks heard (someone still listening will likely finish), up to MAX
+    // (~8 min of audio). Quotas that reset (daily Workers AI, Cartesia's monthly) get the full window; Deepgram's
+    // one-time credit never comes back, so it stays shallow.
+    const CF_LOOKAHEAD_MIN = 4;
+    const CF_LOOKAHEAD_MAX = 20;
+    const CF_LOOKAHEAD_LIMITED = 2;
+    const CF_LIMITED_TIERS = new Set(["deepgram"]);
     const CHARS_PER_SEC = 15;    // rough TTS reading speed at rate 1.0, for ETA
 
     const PLAY_ICON = "▶";   // ▶
@@ -587,6 +595,9 @@
     let trimHost = "";            // hostname whose trim corrections apply ("" = pasted text)
     let articleTitle = "Article"; // for the lock-screen / media metadata
     const audioCache = new Map(); // key `${model}|${voice}|${text}` -> Blob (session only)
+    const audioInflight = new Map();  // same key -> pending fetch, so look-ahead and handoff share one request
+    let cfChunksHeard = 0;        // premium chunks finished this reading; drives the look-ahead ramp
+    let cfFilling = false;        // the look-ahead loop is running
 
     // Per-word highlighting state (browser engine, where onboundary fires).
     let currentWordSpans = [];    // [{ start, end, el }] for the active chunk
@@ -820,9 +831,14 @@
 
     function cacheAudio(key, blob) {
       audioCache.set(key, blob);
-      // Simple FIFO eviction once we exceed the cap.
-      while (audioCache.size > AUDIO_CACHE_MAX) {
-        audioCache.delete(audioCache.keys().next().value);
+      if (audioCache.size <= AUDIO_CACHE_MAX) return;
+      // FIFO, but never evict the current chunk or the look-ahead window: that audio is about to play.
+      const keep = new Set();
+      const end = Math.min(chunks.length - 1, chunkIndex + CF_LOOKAHEAD_MAX);
+      for (let i = chunkIndex; i <= end; i++) keep.add(cfCacheKey(chunks[i]));
+      for (const k of audioCache.keys()) {
+        if (audioCache.size <= AUDIO_CACHE_MAX) break;
+        if (!keep.has(k)) audioCache.delete(k);
       }
     }
 
@@ -1846,11 +1862,17 @@
 
     // --- Cloudflare engine -------------------------------------------------
 
-    async function fetchCfAudio(text) {
-      // Reuse already-generated audio (saves latency and daily quota).
+    function fetchCfAudio(text) {
+      // Reuse already-generated or in-flight audio (saves latency and daily quota).
       const cacheKey = cfCacheKey(text);
-      if (audioCache.has(cacheKey)) return audioCache.get(cacheKey);
+      if (audioCache.has(cacheKey)) return Promise.resolve(audioCache.get(cacheKey));
+      if (audioInflight.has(cacheKey)) return audioInflight.get(cacheKey);
+      const p = requestCfAudio(text, cacheKey).finally(() => audioInflight.delete(cacheKey));
+      audioInflight.set(cacheKey, p);
+      return p;
+    }
 
+    async function requestCfAudio(text, cacheKey) {
       const key = cfKey.value.trim();
       if (!key) { const e = new Error("no-key"); e.code = "no-key"; throw e; }
       let res;
@@ -1916,7 +1938,8 @@
     // retry if they navigate or stop in the meantime.
     function quotaFallback() {
       const t = cfPlayToken;
-      const retry = (fn) => setTimeout(() => { if (t === cfPlayToken) fn(); }, 1500);
+      // Background tabs throttle timers (Chrome: to ~1/min), so with the screen off retry at once.
+      const retry = (fn) => setTimeout(() => { if (t === cfPlayToken) fn(); }, document.hidden ? 0 : 1500);
       const next = CF_TIERS[CF_TIERS.indexOf(cfModel.value) + 1];
       if (next) {
         setStatus(`Premium quota reached for this voice — switching to ${CF_TIER_LABELS[next]}...`);
@@ -1963,6 +1986,7 @@
         setControls("playing");
         setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
         prepareNextCfChunk(token);  // load the next chunk before this one ends
+        fillCfLookahead();
       } catch (error) {
         if (token !== cfPlayToken) return;
         // Autoplay blocked (shared-in article, no user gesture yet): the src
@@ -2011,15 +2035,46 @@
       if (next >= chunks.length) return;
       try {
         const blob = await fetchCfAudio(chunks[next]);
-        // Bail if playback moved on (skip, stop, or the chunk already advanced).
-        if (token !== cfPlayToken || chunkIndex + 1 !== next) return;
+        // Bail if playback moved on (skip, stop, or the chunk already advanced), or another caller loaded it.
+        if (token !== cfPlayToken || chunkIndex + 1 !== next || cfPrepared === next) return;
         const el = setCfSource(1 - cfActive, blob);
         el.onended = null;
         // A load failure only invalidates the preload, it isn't a play error.
         el.onerror = () => { if (cfPrepared === next) cfPrepared = -1; };
         cfPrepared = next;
       } catch {
-        cfPrepared = -1;
+        if (cfPrepared !== next) cfPrepared = -1;  // fillCfLookahead() retries the fetch
+      }
+    }
+
+    function cfLookahead() {
+      if (CF_LIMITED_TIERS.has(cfModel.value)) return CF_LOOKAHEAD_LIMITED;
+      return Math.min(CF_LOOKAHEAD_MAX, Math.max(CF_LOOKAHEAD_MIN, 2 * cfChunksHeard));
+    }
+
+    // Keep the look-ahead window's audio in the cache, one request at a time: parallel requests would hit Workers AI
+    // rate limits, which come back as 429 and read as a spent quota. A fetch is ~1-3 s against ~25 s of playback per
+    // chunk, so the lead still grows fast. Reads chunks/chunkIndex fresh each round, so a skip or a new article just
+    // moves the window. Errors stop the loop quietly; the next chunk start re-runs it, and the play path is what
+    // reacts to a quota error.
+    async function fillCfLookahead() {
+      if (cfFilling) return;
+      cfFilling = true;
+      try {
+        while (activeEngine() === "cloudflare" && playbackState !== "idle" && chunks.length) {
+          // Bounded by the article's last chunk, so the window never runs past the end.
+          const end = Math.min(chunks.length - 1, chunkIndex + cfLookahead());
+          let i = chunkIndex + 1;
+          while (i <= end && audioCache.has(cfCacheKey(chunks[i]))) i++;
+          if (i > end) break;
+          await fetchCfAudio(chunks[i]);
+          // A prefetch that failed earlier left the idle element empty; load it now that the audio is here.
+          if (i === chunkIndex + 1 && cfPrepared !== i) prepareNextCfChunk(cfPlayToken);
+        }
+      } catch {
+        // network / quota / key error: leave it to the play path
+      } finally {
+        cfFilling = false;
       }
     }
 
@@ -2032,6 +2087,7 @@
       const token = cfPlayToken;
       chunkCharOffset = 0;
       chunkIndex += 1;
+      cfChunksHeard += 1;
       if (chunkIndex >= chunks.length) {
         setStatus("Finished reading.");
         setControls("idle");
@@ -2056,6 +2112,7 @@
       buildSentenceSpans(chunkIndex);
       setControls("playing");
       setStatus(`Reading part ${chunkIndex + 1} of ${chunks.length}...`);
+      fillCfLookahead();
       el.play().then(() => prepareNextCfChunk(token)).catch(() => {
         if (token !== cfPlayToken) return;
         playCloudflareChunk();  // refused (rare in background): retry the long way
@@ -2197,6 +2254,7 @@
       // Draw the narrator for this reading (a no-op unless "Random" is chosen).
       if (engine === "cloudflare") resolveCfVoice();
       stopAll();
+      cfChunksHeard = 0;  // new reading: the look-ahead ramp starts over
       chunks = chunkArticle(cleaned, CHUNK_SIZE);
       computeSentenceStarts();
       chunkIndex = Math.max(0, Math.min(startIndex, chunks.length - 1));
